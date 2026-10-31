@@ -1,33 +1,43 @@
-# Neesha dev stack. Local mode binds nothing but 127.0.0.1.
+# Neesha dev stack.
 #
-#   docker compose build
+#   docker compose up -d postgres
 #   docker compose run --rm neesha --help
 #
-# Team/cloud mode (Postgres) is opt-in via the "team" profile:
-#   docker compose --profile team up
+# Postgres is the deployment target, not an optional extra: the budget
+# ledger's reserve-then-settle needs row locks and the job queue needs
+# SKIP LOCKED. It binds to loopback only.
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: neesha
+      POSTGRES_USER: neesha
+      POSTGRES_PASSWORD: ${NEESHA_PG_PASSWORD:?set NEESHA_PG_PASSWORD}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U neesha -d neesha"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   neesha:
     build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
     volumes:
       - ./data:/app/data
       - ./runs:/app/runs
       - ./reports:/app/reports
     environment:
-      NEESHA_STORE_KEY: ${NEESHA_STORE_KEY:-}
-      NEESHA_PREFLIGHT_KEY: ${NEESHA_PREFLIGHT_KEY:-}
+      NEESHA_DATABASE_URL: >-
+        postgresql+psycopg://neesha:${NEESHA_PG_PASSWORD:?set NEESHA_PG_PASSWORD}@postgres:5432/neesha
+      NEESHA_STORE_KEY: ${NEESHA_STORE_KEY:?set NEESHA_STORE_KEY}
+      NEESHA_PREFLIGHT_KEY: ${NEESHA_PREFLIGHT_KEY:?set NEESHA_PREFLIGHT_KEY}
     entrypoint: ["neesha"]
-
-  postgres:
-    image: postgres:16-alpine
-    profiles: ["team"]
-    environment:
-      POSTGRES_DB: neesha
-      POSTGRES_USER: neesha
-      POSTGRES_PASSWORD: ${NEESHA_PG_PASSWORD:-neesha}
-    ports:
-      - "127.0.0.1:5432:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
 
 volumes:
   pgdata:

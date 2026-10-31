@@ -450,18 +450,59 @@ onto tool calls, and `estimate_cost`/`retention_policy` onto metadata.
 
 ---
 
-## 9. Decisions I need from you
+## 9. Decisions — resolved 2026-10-31
 
-1. **Drop VirusTotal?** My recommendation is yes — the free API's terms
-   prohibit this exact use and nothing depends on it.
-2. **HIBP: own domain only on Core (~$4.39/mo)?** Client-domain monitoring
-   needs Pro at ~$379/mo, which does not fit the $100 cap and is a
-   commercial call rather than a technical one.
-3. **Keep SQLite working for local dev, or go Postgres-only?** Postgres-only
-   is less code and less abstraction; dual means you can keep running the
-   tool on a laptop with no Docker.
-4. **Is `$100/mo` still the cap** once hosting (~$10-20 Linode) and a Shodan
-   membership (~$49 one-time) are inside it?
+Approved, with the stated preference for the leanest workable tool.
 
-No code written yet. Say which way on these four and I'll write the migrations
-and the adapter base in one pass.
+1. **VirusTotal: dropped.** Its public API terms prohibit this exact use.
+   crt.sh, URLScan and Shodan cover the overlap.
+2. **HIBP: own domain only, on Core (~$4.39/mo).** The adapter will be built
+   with the verified-domain precondition enforced in the gate regardless of
+   plan, since that is a licence condition. Client-domain monitoring stays a
+   separate commercial decision at ~$379/mo.
+3. **Postgres is the deployment target, with one portable schema.**
+   SQLAlchemy Core plus Alembic, so the DDL is written once rather than
+   twice. Postgres runs locally through the Compose file; SQLite remains the
+   test backend because it is an order of magnitude faster to spin up.
+   Maintaining two hand-written backends would have been the opposite of
+   lean.
+4. **Cap stays $100/mo**, inclusive of hosting and LLM tokens. Shodan
+   membership is a one-time ~$49 recorded as a fixed-cost ledger line, not a
+   recurring draw.
+
+### Implementation status
+
+Done in this pass:
+
+- `neesha/db/schema.py` — 13 tables, 22 CHECK constraints, portable between
+  SQLite and Postgres via `with_variant`.
+- `neesha/adapters/base.py` — the adapter contract and its value types.
+- `migrations/` — Alembic configured to read `NEESHA_DATABASE_URL`, with the
+  initial revision. Verified: upgrade creates all 13 tables, `alembic check`
+  reports no drift against the model, downgrade returns to base.
+- `tests/test_schema.py`, `tests/test_adapters.py` — 34 new tests. 129 total.
+- Compose now starts Postgres by default and refuses to start without the
+  three required secrets, rather than falling back to a default password.
+
+**One design bug the tests caught**, worth recording because it would have
+been expensive later: the `fact` uniqueness constraint was originally keyed
+on `(entity_id, attribute, value, run_id)`, which would have rejected the
+second source asserting the same fact in a run — that is, it would have made
+corroboration *unstorable*, reintroducing the exact failure the table exists
+to fix. It is now keyed on `source_record_id`, which deduplicates a single
+source repeating itself while letting independent sources agree.
+
+### Not done, deliberately
+
+- **Append-only enforcement on `query_log`** is a Postgres GRANT, not a
+  schema object. It belongs in the deployment migration alongside the
+  application role, and is noted in `schema.py`.
+- **No data migrated** from `data/evidence.sqlite3`. 22 example.com rows of
+  test data; it will be re-collected.
+- **The existing `Evidence`/`EvidenceStore` path still runs.** Nothing is
+  cut over yet, so the tool keeps working while the new layer is built
+  beside it. The cutover happens with the first adapter.
+
+Next: step 3, the ledger and policy gate, with the concurrency tests that
+prove the cap cannot be exceeded. That is the piece that genuinely needs
+Postgres, so it is also where the local Compose Postgres gets exercised.

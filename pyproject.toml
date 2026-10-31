@@ -17,10 +17,17 @@ dependencies = [
     "dnspython>=2.6.0",
     "cryptography>=42.0.0",
     "certifi>=2024.2.2",
+    "SQLAlchemy>=2.0",
+    "alembic>=1.13",
 ]
+
+
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0.0"]
+# Postgres is the deployment target; kept as an extra so the test suite and
+# local development run on SQLite without needing a driver build.
+postgres = ["psycopg[binary]>=3.1"]
 
 [project.scripts]
 neesha = "neesha.cli.main:app"
