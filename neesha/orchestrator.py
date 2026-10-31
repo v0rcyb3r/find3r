@@ -51,13 +51,24 @@ class Orchestrator:
             )
         return PreflightGate().verify(path)
 
-    def require_scope(self) -> Scope:
+    def require_scope(self, expected_target: str | None = None) -> Scope:
         path = self.run_dir / "scope.json"
         if not path.exists():
             raise PreflightError(
                 "scope.json missing — run `neesha scope create` first"
             )
-        return Scope.model_validate_json(path.read_text())
+        scope = Scope.model_validate_json(path.read_text())
+        if expected_target is not None:
+            authorized = scope.target.strip().lower().rstrip(".")
+            requested = expected_target.strip().lower().rstrip(".")
+            if authorized != requested:
+                # Otherwise a scope authorizing one company silently licenses
+                # collection against another.
+                raise PreflightError(
+                    f"scope authorizes {scope.target!r}, not {expected_target!r} — "
+                    "create a scope for this target before collecting"
+                )
+        return scope
 
     def plan(self, seed: str, seed_type: str) -> list[str]:
         base = _STEPS_BY_TYPE.get(seed_type, ["TargetResolver", "AccuracyGuardrail", "ReportWriter"])

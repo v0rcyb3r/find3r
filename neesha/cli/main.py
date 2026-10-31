@@ -280,13 +280,16 @@ def posture(
     orch = Orchestrator(run_dir)
     try:
         orch.require_preflight()
-        scope = orch.require_scope()
+        scope = orch.require_scope(expected_target=normalize_domain(target))
     except PreflightError as exc:
         console.print(f"[red]blocked:[/red] {exc}")
         raise typer.Exit(1)
 
+    audit = AuditLog(run_dir / "audit.jsonl")
     with open_store(store) as evidence_store:
-        collector = PostureCollector(ScopeEngine(scope), evidence_store, target)
+        collector = PostureCollector(
+            ScopeEngine(scope), evidence_store, target, audit=audit
+        )
         try:
             evidences, brief = collector.run()
         except ScopeViolation as exc:
@@ -343,7 +346,7 @@ def passive(
     orch = Orchestrator(run_dir)
     try:
         orch.require_preflight()
-        scope = orch.require_scope()
+        scope = orch.require_scope(expected_target=normalize_domain(target))
     except PreflightError as exc:
         console.print(f"[red]blocked:[/red] {exc}")
         raise typer.Exit(1)
@@ -445,22 +448,31 @@ def run(
 
     domain = normalize_domain(target)
     run_dir = runs / domain
-    run_dir.mkdir(parents=True, exist_ok=True)
     out_dir = out / domain
-    out_dir.mkdir(parents=True, exist_ok=True)
     store_path = data / "evidence.sqlite3"
 
-    preflight = Preflight(
-        purpose=f"local run for {domain}",
-        observer="ISP",
-        deployment_mode="local",
-        storage_encrypted=True,
-        retention_policy_set=True,
-    )
-    (run_dir / "preflight.json").write_text(json.dumps(PreflightGate().issue(preflight), indent=2, default=str))
-    scope = Scope(target=domain, target_type="domain", purpose="local run", observer="ISP")
-    (run_dir / "scope.json").write_text(scope.model_dump_json(indent=2))
+    # The gate is not self-service. This command used to mint its own
+    # preflight, assert storage_encrypted=True without checking, sign it with
+    # the gate's own key and then "verify" it — which made the gate
+    # decorative on the tool's main path. AUDIT.md G1.
+    orch = Orchestrator(run_dir)
+    try:
+        orch.require_preflight()
+        scope = orch.require_scope(expected_target=domain)
+    except PreflightError as exc:
+        console.print(f"[red]blocked:[/red] {exc}")
+        console.print("\n[bold]Authorize this run first:[/bold]")
+        console.print(
+            f"  neesha preflight --purpose '<why this target>' "
+            f"--observer '<strongest observer>' --out {run_dir}"
+        )
+        console.print(
+            f"  neesha scope create --target {domain} "
+            f"--purpose '<why this target>' --out {run_dir}"
+        )
+        raise typer.Exit(1)
 
+    out_dir.mkdir(parents=True, exist_ok=True)
     audit = AuditLog(run_dir / "audit.jsonl")
     engine = ScopeEngine(scope)
     with open_store(store_path) as evidence_store:

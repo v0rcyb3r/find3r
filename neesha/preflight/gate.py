@@ -59,11 +59,24 @@ class PreflightGate:
 
     @staticmethod
     def _default_key() -> bytes:
+        """Return the signing key, or refuse.
+
+        There is deliberately no fallback. A hardcoded default key ships in
+        the source, which means anyone holding the source can mint a valid
+        preflight file and the signature proves nothing. AUDIT.md G2.
+        """
         env = os.environ.get("NEESHA_PREFLIGHT_KEY")
-        if env:
-            return env.encode()
-        # Local-only fallback. Callers should set NEESHA_PREFLIGHT_KEY in shared use.
-        return b"neesha-local-dev-key-do-not-use-in-prod"
+        if not env:
+            raise PreflightError(
+                "NEESHA_PREFLIGHT_KEY is not set.\n\n"
+                "The preflight gate signs authorization files with it, so there "
+                "is no default: a key committed in the source would let anyone "
+                "forge an authorization.\n\n"
+                "  export NEESHA_PREFLIGHT_KEY=\"$(python3 -c "
+                "'import secrets;print(secrets.token_urlsafe(32))')\"\n\n"
+                "Use the same key across the team, and keep it out of the repo."
+            )
+        return env.encode()
 
     def issue(self, preflight: Preflight) -> dict[str, Any]:
         payload = preflight.model_dump(mode="json")
