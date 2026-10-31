@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import ssl
+import urllib.parse
 import urllib.request
 from typing import Any, Optional
 
@@ -17,6 +18,35 @@ from cryptography.x509 import DNSName
 from cryptography.x509.oid import ExtensionOID, NameOID
 
 _UA = "Mozilla/5.0 (compatible; neesha/0.1)"
+
+_REDACT_PARAMS = frozenset({
+    "api_key", "apikey", "api-key", "key", "token", "access_token", "auth",
+    "password", "passwd", "secret", "signature", "sig", "session",
+})
+
+
+def redact_url(url: str) -> str:
+    """Strip credential-bearing query parameters from a URL.
+
+    Evidence records and exported reports both carry ``source_url``, so a
+    credentialed request URL must never reach them. Sensitive parameter
+    values are replaced with ``REDACTED``; everything else is preserved so
+    the URL still documents what was requested.
+    """
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return "REDACTED"
+    if not parts.query:
+        return url
+    pairs = urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
+    cleaned = [
+        (k, "REDACTED" if k.lower() in _REDACT_PARAMS else v) for k, v in pairs
+    ]
+    return urllib.parse.urlunsplit(
+        parts._replace(query=urllib.parse.urlencode(cleaned))
+    )
+
 
 
 def _default_context() -> ssl.SSLContext:

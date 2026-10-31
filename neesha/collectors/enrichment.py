@@ -7,9 +7,10 @@ corroboration is required for High). No API alone produces a "verified" claim.
 from __future__ import annotations
 
 import os
+import urllib.parse
 from typing import ClassVar
 
-from neesha.collectors.network import http_get_json, http_post_json
+from neesha.collectors.network import http_get_json, http_post_json, redact_url
 from neesha.collectors.osint import PassiveCollector
 from neesha.evidence.models import (
     AdmiraltyClaimGrade,
@@ -46,7 +47,7 @@ class EnrichmentAdapter(PassiveCollector):
         return self.record(
             claim=claim,
             source_type="commercial_api",
-            source_url=source_url,
+            source_url=redact_url(source_url),
             confidence=Confidence.MEDIUM,
             source_grade=AdmiraltySourceGrade.C,
             claim_grade=AdmiraltyClaimGrade.THREE,
@@ -64,17 +65,26 @@ class HunterAdapter(EnrichmentAdapter):
         if not key:
             return []
         domain = self.target
-        url = f"https://api.hunter.io/v2/domain-search?domain={domain}&api_key={key}"
+        # The key travels in the request URL because that is the interface
+        # Hunter exposes; it must never travel into provenance. These two
+        # URLs are deliberately distinct — see redact_url.
+        request_url = (
+            "https://api.hunter.io/v2/domain-search"
+            f"?domain={urllib.parse.quote(domain)}&api_key={key}"
+        )
+        provenance_url = redact_url(request_url)
         self.authorize(self.source, CollectionMode.PASSIVE)
         try:
-            data = http_get_json(url)
+            data = http_get_json(request_url)
         except ScopeViolation:
             raise
         except Exception as exc:  # noqa: BLE001
-            return self._error(f"Hunter query failed: {exc}")
+            # Never interpolate the exception without scrubbing: urllib puts
+            # the full request URL into HTTPError messages.
+            return self._error(f"Hunter query failed: {redact_url(str(exc))}")
         emails = [e.get("value") for e in data.get("data", {}).get("emails", []) if e.get("value")]
         claim = f"Hunter.io reports {len(emails)} email(s) for {domain}: {', '.join(emails[:15]) or 'none'}"
-        return [self.record_api(claim, url)]
+        return [self.record_api(claim, provenance_url)]
 
 
 class ApolloAdapter(EnrichmentAdapter):

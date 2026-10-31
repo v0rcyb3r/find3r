@@ -11,6 +11,7 @@ from datetime import timedelta
 from typing import ClassVar, Optional
 
 from neesha.audit import AuditLog
+from neesha.collectors.network import redact_url
 from neesha.evidence.models import (
     AdmiraltyClaimGrade,
     AdmiraltySourceGrade,
@@ -70,7 +71,10 @@ class Collector(ABC):
             target_id=self.target,
             entity_id=entity_id,
             claim=claim,
-            source_url=source_url,
+            # Redact here, not at the call site: this is the one path every
+            # collector takes, so a careless adapter cannot leak a key into
+            # the ledger or an exported report.
+            source_url=redact_url(source_url) if source_url else None,
             source_type=source_type,
             collection_mode=CollectionMode.PASSIVE,
             collector=self.name,
