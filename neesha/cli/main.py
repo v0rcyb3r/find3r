@@ -7,6 +7,7 @@ their planned phase.
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -18,6 +19,7 @@ from neesha.audit import AuditLog
 from neesha.collectors.posture import PostureCollector, normalize_domain
 from neesha.config import Config, DEFAULT_CONFIG_PATH
 from neesha.evidence.models import CollectionMode, Evidence
+from neesha.evidence.crypto import StoreEncryptionError
 from neesha.evidence.store import EvidenceStore
 from neesha.guardrail.engine import Guardrail
 from neesha.orchestrator import Orchestrator
@@ -39,6 +41,28 @@ app.add_typer(scope_app, name="scope")
 
 guardrail_app = typer.Typer(help="Accuracy guardrail operations.", no_args_is_help=True)
 app.add_typer(guardrail_app, name="guardrail")
+
+
+@contextmanager
+def open_store(path: Path):
+    """Open the evidence store, reporting key problems as messages not tracebacks.
+
+    Covers both failure points: opening a store whose encryption state does
+    not match the environment, and decrypting a row with the wrong key.
+    """
+    try:
+        store = EvidenceStore(path)
+    except StoreEncryptionError as exc:
+        console.print(f"[red]store error:[/red] {exc}")
+        raise typer.Exit(1)
+    try:
+        yield store
+    except StoreEncryptionError as exc:
+        console.print(f"[red]store error:[/red] {exc}")
+        raise typer.Exit(1)
+    finally:
+        store.close()
+
 
 
 @app.command()
@@ -183,7 +207,7 @@ def evidence_list(
     store: Path = typer.Option(Path("./data/evidence.sqlite3"), "--store"),
 ) -> None:
     """List evidence records for a target."""
-    with EvidenceStore(store) as s:
+    with open_store(store) as s:
         rows = s.list_by_target(target)
     if not rows:
         console.print(f"[yellow]no evidence for target {target!r}[/yellow]")
@@ -203,7 +227,7 @@ def evidence_export(
     """Export a target's evidence ledger as JSONL/JSON/CSV/Markdown."""
     from neesha.report import writer
 
-    with EvidenceStore(store) as s:
+    with open_store(store) as s:
         rows = s.list_by_target(target)
     if not rows:
         console.print(f"[yellow]no evidence for target {target!r}[/yellow]")
@@ -261,7 +285,7 @@ def posture(
         console.print(f"[red]blocked:[/red] {exc}")
         raise typer.Exit(1)
 
-    with EvidenceStore(store) as evidence_store:
+    with open_store(store) as evidence_store:
         collector = PostureCollector(ScopeEngine(scope), evidence_store, target)
         try:
             evidences, brief = collector.run()
@@ -334,7 +358,7 @@ def passive(
     domain = normalize_domain(target)
     audit = AuditLog(run_dir / "audit.jsonl")
     all_evidence = []
-    with EvidenceStore(store) as evidence_store:
+    with open_store(store) as evidence_store:
         engine = ScopeEngine(scope)
         for name in names:
             collector = get_collector(name)(engine, evidence_store, domain, audit=audit)
@@ -377,7 +401,7 @@ def resolve(
     from neesha.resolve.normalize import canonicalize_domain
     from neesha.resolve.resolver import EntityResolver
 
-    with EvidenceStore(store) as s:
+    with open_store(store) as s:
         evidence = s.list_by_target(target)
     if not evidence:
         console.print("[yellow]no evidence; run `neesha posture` or `neesha passive` first[/yellow]")
@@ -439,7 +463,7 @@ def run(
 
     audit = AuditLog(run_dir / "audit.jsonl")
     engine = ScopeEngine(scope)
-    with EvidenceStore(store_path) as evidence_store:
+    with open_store(store_path) as evidence_store:
         posture_collector = PostureCollector(engine, evidence_store, domain, audit=audit)
         _, brief = posture_collector.run()
         (out_dir / "posture.md").write_text(brief.to_markdown())
@@ -534,7 +558,7 @@ def _load_evidence(
     if not target:
         console.print("[red]provide a file or --target[/red]")
         raise typer.Exit(1)
-    with EvidenceStore(store) as s:
+    with open_store(store) as s:
         return s.list_by_target(target)
 
 

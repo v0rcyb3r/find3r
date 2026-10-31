@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 import neesha.collectors.posture as posture_mod
 from neesha.collectors.posture import PostureCollector, normalize_domain
-from neesha.evidence.store import EvidenceStore
+from tests.helpers import make_store
 from neesha.resolvers.dns import QueryResult, Record
 from neesha.scope.engine import ScopeEngine
 from neesha.scope.models import Scope
@@ -57,7 +57,7 @@ def test_collector_produces_graded_brief(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(posture_mod, "dnssec_status", lambda resolvers, domain: ("validated", True, True))
 
-    store = EvidenceStore(tmp_path / "e.db")
+    store = make_store(tmp_path / "e.db")
     scope = Scope(target="acme.com", target_type="domain", purpose="test", observer="target")
     collector = PostureCollector(ScopeEngine(scope), store, "acme.com")
 

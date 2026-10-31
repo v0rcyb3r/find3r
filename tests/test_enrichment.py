@@ -5,13 +5,13 @@ from neesha.collectors.enrichment import (
     HunterAdapter,
 )
 from neesha.evidence.models import AdmiraltyClaimGrade, AdmiraltySourceGrade, Confidence
-from neesha.evidence.store import EvidenceStore
+from tests.helpers import make_store
 from neesha.scope.engine import ScopeEngine
 from neesha.scope.models import Scope
 
 
 def make_collector(cls, tmp_path, target="example.com"):
-    store = EvidenceStore(tmp_path / "e.db")
+    store = make_store(tmp_path / "e.db")
     scope = Scope(target=target, target_type="domain", purpose="test", observer="target")
     return cls(ScopeEngine(scope), store, target), store
 

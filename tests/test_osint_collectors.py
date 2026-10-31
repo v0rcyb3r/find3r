@@ -7,7 +7,7 @@ from neesha.collectors.osint import (
     WaybackCollector,
 )
 from neesha.evidence.models import AdmiraltyClaimGrade, AdmiraltySourceGrade
-from neesha.evidence.store import EvidenceStore
+from tests.helpers import make_store
 from neesha.scope.engine import ScopeEngine, ScopeViolation
 from neesha.scope.models import Scope
 
@@ -19,7 +19,7 @@ def make_scope(target="example.com", **overrides):
 
 
 def make_collector(cls, tmp_path, target="example.com", **scope_overrides):
-    store = EvidenceStore(tmp_path / "e.db")
+    store = make_store(tmp_path / "e.db")
     collector = cls(ScopeEngine(make_scope(target, **scope_overrides)), store, target)
     return collector, store
 

@@ -8,11 +8,24 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from neesha.evidence.crypto import Cipher, PlaintextCipher, make_cipher
+from neesha.evidence.crypto import (
+    KDF_ID,
+    SCRYPT_N,
+    SCRYPT_P,
+    SCRYPT_R,
+    Cipher,
+    PlaintextCipher,
+    StoreEncryptionError,
+    make_cipher,
+    new_salt,
+    plaintext_allowed_by_env,
+    store_key_from_env,
+)
 from neesha.evidence.models import (
     AdmiraltyClaimGrade,
     AdmiraltySourceGrade,
@@ -44,7 +57,31 @@ CREATE TABLE IF NOT EXISTS evidence (
 );
 CREATE INDEX IF NOT EXISTS idx_evidence_target ON evidence(target_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_entity ON evidence(entity_id);
+CREATE TABLE IF NOT EXISTS store_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
+
+_LEGACY_HELP = """This store holds rows written in plaintext, so a key cannot be
+applied to it in place without rewriting every row. Either:
+  - point --store at a new path and re-collect, or
+  - read it once with NEESHA_ALLOW_PLAINTEXT=1 and export, then re-import
+    into a new encrypted store."""
+
+_NO_KEY_HELP = """Refusing to open an evidence store without encryption.
+
+Evidence records hold target infrastructure detail and business contact data,
+so the store is encrypted at rest by default.
+
+  export NEESHA_STORE_KEY='<a long random passphrase>'
+
+For throwaway local experiments only, opt in explicitly:
+
+  NEESHA_ALLOW_PLAINTEXT=1 neesha ...
+
+Keep the passphrase somewhere you will not lose it: there is no recovery
+path, and a store written with one key cannot be read with another."""
 
 
 def _parse_dt(value: str) -> datetime:
@@ -52,14 +89,89 @@ def _parse_dt(value: str) -> datetime:
 
 
 class EvidenceStore:
-    def __init__(self, path: Path | str, cipher: Optional[Cipher] = None):
+    def __init__(
+        self,
+        path: Path | str,
+        cipher: Optional[Cipher] = None,
+        allow_plaintext: Optional[bool] = None,
+    ):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.cipher = cipher or make_cipher()
         self._conn = sqlite3.connect(str(self.path))
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(SCHEMA)
         self._conn.commit()
+        # An explicitly injected cipher wins: that is the test and
+        # key-rotation path. Otherwise resolve from the environment, and
+        # refuse rather than silently write plaintext.
+        self.cipher = (
+            cipher if cipher is not None else self._resolve_cipher(allow_plaintext)
+        )
+
+    # ---- key material ------------------------------------------------------
+
+    def _meta_get(self, key: str) -> Optional[str]:
+        row = self._conn.execute(
+            "SELECT value FROM store_meta WHERE key = ?", (key,)
+        ).fetchone()
+        return row["value"] if row else None
+
+    def _meta_set(self, key: str, value: str) -> None:
+        self._conn.execute(
+            "INSERT INTO store_meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        self._conn.commit()
+
+    def _resolve_cipher(self, allow_plaintext: Optional[bool]) -> Cipher:
+        if allow_plaintext is None:
+            allow_plaintext = plaintext_allowed_by_env()
+        passphrase = store_key_from_env()
+        recorded = self._meta_get("kdf")
+        legacy_plaintext = recorded is None and self.count() > 0
+
+        if passphrase:
+            if recorded == "plaintext" or legacy_plaintext:
+                raise StoreEncryptionError(
+                    f"{self.path}: NEESHA_STORE_KEY is set but this store is "
+                    f"plaintext.\n\n{_LEGACY_HELP}"
+                )
+            salt_hex = self._meta_get("salt")
+            if salt_hex is None:
+                salt = new_salt()
+                self._meta_set("salt", salt.hex())
+                self._meta_set("kdf", KDF_ID)
+                self._meta_set("scrypt_n", str(SCRYPT_N))
+                self._meta_set("scrypt_r", str(SCRYPT_R))
+                self._meta_set("scrypt_p", str(SCRYPT_P))
+            else:
+                salt = bytes.fromhex(salt_hex)
+            return make_cipher(
+                passphrase,
+                salt,
+                n=int(self._meta_get("scrypt_n") or SCRYPT_N),
+                r=int(self._meta_get("scrypt_r") or SCRYPT_R),
+                p=int(self._meta_get("scrypt_p") or SCRYPT_P),
+            )
+
+        if recorded == KDF_ID:
+            raise StoreEncryptionError(
+                f"{self.path}: this store is encrypted. Set NEESHA_STORE_KEY to "
+                "the passphrase it was written with."
+            )
+
+        if allow_plaintext:
+            if recorded is None:
+                self._meta_set("kdf", "plaintext")
+            print(
+                f"WARNING: {self.path} is UNENCRYPTED (NEESHA_ALLOW_PLAINTEXT). "
+                "Do not put real target data here.",
+                file=sys.stderr,
+            )
+            return PlaintextCipher()
+
+        raise StoreEncryptionError(f"{self.path}: {_NO_KEY_HELP}")
 
     def close(self) -> None:
         self._conn.close()
