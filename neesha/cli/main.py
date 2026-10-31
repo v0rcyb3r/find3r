@@ -42,6 +42,12 @@ app.add_typer(scope_app, name="scope")
 guardrail_app = typer.Typer(help="Accuracy guardrail operations.", no_args_is_help=True)
 app.add_typer(guardrail_app, name="guardrail")
 
+# The new typed-fact harness. Kept as its own command group while the legacy
+# Evidence path still runs; they converge when the posture collector is ported.
+from neesha.cli.harness_cli import harness_app  # noqa: E402
+
+app.add_typer(harness_app, name="harness")
+
 
 @contextmanager
 def open_store(path: Path):

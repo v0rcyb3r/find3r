@@ -124,6 +124,13 @@ computed from the tier, so a metered adapter cannot land in it by accident.
 - `neesha/adapters/base.py` — the adapter contract.
 - `neesha/ledger/ledger.py` — reserve-then-settle budget ledger.
 - `neesha/harness/gate.py` — the policy gate.
+- `neesha/harness/executor.py` — the only caller of an adapter.
+- `neesha/harness/plan.py` — PIR templates → collection plan.
+- `neesha/harness/run.py` — one pass of the cycle, with stop reasons.
+- `neesha/harness/repository.py` — entities, source records, facts, cache.
+- `neesha/adapters/` — `crtsh.py` (A, free), `hunter.py` (B, metered),
+  `registry.py` (capability-based selection).
+- `neesha/cli/harness_cli.py` — `neesha harness` command group.
 - `migrations/` — Alembic, reading `NEESHA_DATABASE_URL`.
 
 ## Status
@@ -136,9 +143,23 @@ computed from the tier, so a metered adapter cannot land in it by accident.
   verified on Postgres and SQLite.
 - Step 3 complete: ledger and policy gate. The cap holds under concurrency,
   proven against real Postgres and verified to fail without the row lock.
+- Step 4 complete: the harness loop runs end to end with crt.sh (free) and
+  Hunter (metered). PIRs drive planning, the executor is the only caller of
+  an adapter, cache hits cost nothing, failed calls release their
+  reservation, and unanswered requirements are reported as gaps.
 
 The legacy `Evidence`/`EvidenceStore` path still runs untouched beside the
 new layer; cutover happens with the first adapter.
 
-Next: step 4 — the harness loop with crt.sh (free) and Hunter (metered)
-end to end.
+## Running it
+
+```bash
+make db-up && make migrate            # or leave NEESHA_DATABASE_URL on sqlite
+neesha harness engagement create --domain acme.com --by you@example
+neesha harness budget set 100
+neesha harness run acme.com --pir attack-surface --pir who-to-contact
+neesha harness budget show
+```
+
+Next: step 5 — design tokens and the app shell, then the Overview tab
+against real data.

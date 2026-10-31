@@ -22,9 +22,11 @@ principle 3.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
+import json
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, ClassVar, Optional, Protocol, runtime_checkable
 
 
@@ -87,9 +89,48 @@ class RawResult:
     http_status: Optional[int] = None
     content_type: Optional[str] = None
 
+    # When this was actually collected. A cache hit replays an older
+    # collection, and the source record must say so rather than claiming the
+    # data is as fresh as the run that reused it.
+    collected_at: Optional[datetime] = None
+
     @property
     def sha256(self) -> str:
         return hashlib.sha256(self.payload).hexdigest()
+
+    def to_envelope(self) -> bytes:
+        """Serialize for the cache, preserving provenance alongside the body.
+
+        Caching the payload alone would lose the request URL, the origin and
+        the original collection time, and a replayed result has to carry all
+        three to stay honest.
+        """
+        when = self.collected_at or datetime.now(timezone.utc)
+        return json.dumps(
+            {
+                "payload_b64": base64.b64encode(self.payload).decode(),
+                "request_url": self.request_url,
+                "origin_url": self.origin_url,
+                "http_status": self.http_status,
+                "content_type": self.content_type,
+                "collected_at": when.isoformat(),
+            }
+        ).encode()
+
+    @classmethod
+    def from_envelope(cls, blob: bytes) -> "RawResult":
+        data = json.loads(blob.decode())
+        collected_at = data.get("collected_at")
+        return cls(
+            payload=base64.b64decode(data["payload_b64"]),
+            request_url=data["request_url"],
+            origin_url=data.get("origin_url"),
+            http_status=data.get("http_status"),
+            content_type=data.get("content_type"),
+            collected_at=(
+                datetime.fromisoformat(collected_at) if collected_at else None
+            ),
+        )
 
 
 @dataclass(frozen=True)
