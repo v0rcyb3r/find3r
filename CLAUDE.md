@@ -110,13 +110,35 @@ computed from the tier, so a metered adapter cannot land in it by accident.
 - Every briefing passes `Guardrail.apply(...)`.
 - `NEESHA_STORE_KEY` is required. `NEESHA_ALLOW_PLAINTEXT=1` is for throwaway
   local experiments only. `NEESHA_PREFLIGHT_KEY` has no default.
-- Run tests with `.venv/bin/pytest -q`.
+- Run tests with `make test` (SQLite, fast). `make test-pg` additionally
+  runs the budget concurrency proof, which needs `make db-up`; the row lock
+  it exercises is a no-op on SQLite, so those tests skip rather than pass
+  vacuously.
+- Schema changes go through Alembic: edit `neesha/db/schema.py`, then
+  `alembic revision --autogenerate`, then verify `alembic check` is clean on
+  both backends.
+
+## Layout, new layer
+
+- `neesha/db/schema.py` — the 13-table schema (see `DATA_MODEL.md`).
+- `neesha/adapters/base.py` — the adapter contract.
+- `neesha/ledger/ledger.py` — reserve-then-settle budget ledger.
+- `neesha/harness/gate.py` — the policy gate.
+- `migrations/` — Alembic, reading `NEESHA_DATABASE_URL`.
 
 ## Status
 
-Phase 0 audit complete (`AUDIT.md`). Phase 1 safety pass complete: API key
-leak, store encryption, preflight gate bypass, scope-target binding, spend
-containment, collection-mode provenance, dashboard traversal, dead code.
+- Phase 0 audit complete (`AUDIT.md`).
+- Phase 1 safety pass complete: API key leak, store encryption, preflight
+  gate bypass, scope-target binding, spend containment, collection-mode
+  provenance, dashboard traversal, dead code.
+- Step 2 complete: typed-fact schema, adapter contract, Alembic migrations
+  verified on Postgres and SQLite.
+- Step 3 complete: ledger and policy gate. The cap holds under concurrency,
+  proven against real Postgres and verified to fail without the row lock.
 
-Next: typed facts and the step-2 data model, then the ledger and policy gate
-with concurrency tests, then the first vertical slice.
+The legacy `Evidence`/`EvidenceStore` path still runs untouched beside the
+new layer; cutover happens with the first adapter.
+
+Next: step 4 — the harness loop with crt.sh (free) and Hunter (metered)
+end to end.

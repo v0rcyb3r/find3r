@@ -235,7 +235,7 @@ fact = sa.Table(
         nullable=False,
     ),
     sa.Column("confidence", sa.String(8), nullable=False),
-    sa.Column("is_inference", sa.Boolean, nullable=False, server_default=sa.false()),
+    sa.Column("is_inference", sa.Boolean, nullable=False, server_default=sa.text("false")),
     sa.Column("admiralty_source", sa.String(1), nullable=False),
     sa.Column("admiralty_claim", sa.String(1), nullable=False),
     # The column the exporter and the Tier C panel filter on. Prose claims
@@ -280,7 +280,7 @@ relationship = sa.Table(
     ),
     sa.Column("kind", sa.String(24), nullable=False),
     sa.Column("confidence", sa.String(8), nullable=False),
-    sa.Column("is_inference", sa.Boolean, nullable=False, server_default=sa.false()),
+    sa.Column("is_inference", sa.Boolean, nullable=False, server_default=sa.text("false")),
     # How the edge was derived, e.g. 'title-parse-v1'. A power-map edge the
     # analyst cannot interrogate is worse than no edge, so the method is
     # stored alongside the claim.

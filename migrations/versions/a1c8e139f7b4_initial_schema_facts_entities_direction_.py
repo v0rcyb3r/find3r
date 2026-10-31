@@ -1,19 +1,21 @@
 """initial schema: facts, entities, direction, analysis, control
 
-Revision ID: c2e83d8f35b2
+Revision ID: a1c8e139f7b4
 Revises: 
-Create Date: 2026-10-31 15:10:35.414547
+Create Date: 2026-10-31 15:26:09.136998
 
 """
 from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
+# Autogenerate renders with_variant(JSONB(astext_type=Text())) with a bare
+# Text, so the name has to be in scope.
 from sqlalchemy import Text  # noqa: F401
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision: str = 'c2e83d8f35b2'
+revision: str = 'a1c8e139f7b4'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -43,8 +45,8 @@ def upgrade() -> None:
     sa.Column('id', sa.String(length=32), nullable=False),
     sa.Column('authority_basis', sa.String(length=32), nullable=False),
     sa.Column('client_name', sa.Text(), nullable=True),
-    sa.Column('permitted_techniques', sa.JSON().with_variant(postgresql.JSONB(astext_type=Text()), 'postgresql'), server_default='[]', nullable=False),
-    sa.Column('authorized_domains', sa.JSON().with_variant(postgresql.JSONB(astext_type=Text()), 'postgresql'), server_default='[]', nullable=False),
+    sa.Column('permitted_techniques', sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), 'postgresql'), server_default='[]', nullable=False),
+    sa.Column('authorized_domains', sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), 'postgresql'), server_default='[]', nullable=False),
     sa.Column('authorized_by', sa.Text(), nullable=False),
     sa.Column('document_ref', sa.Text(), nullable=True),
     sa.Column('starts_at', sa.DateTime(timezone=True), nullable=False),
@@ -59,10 +61,10 @@ def upgrade() -> None:
     sa.Column('kind', sa.String(length=16), nullable=False),
     sa.Column('canonical_name', sa.Text(), nullable=False),
     sa.Column('company_id', sa.String(length=32), nullable=True),
-    sa.Column('aliases', sa.JSON().with_variant(postgresql.JSONB(astext_type=Text()), 'postgresql'), server_default='[]', nullable=False),
+    sa.Column('aliases', sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), 'postgresql'), server_default='[]', nullable=False),
     sa.Column('confidence', sa.String(length=8), server_default='unknown', nullable=False),
     sa.Column('resolved_by', sa.Text(), nullable=True),
-    sa.Column('merge_history', sa.JSON().with_variant(postgresql.JSONB(astext_type=Text()), 'postgresql'), server_default='[]', nullable=False),
+    sa.Column('merge_history', sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), 'postgresql'), server_default='[]', nullable=False),
     sa.Column('first_seen_at', sa.DateTime(timezone=True), nullable=False),
     sa.Column('last_seen_at', sa.DateTime(timezone=True), nullable=False),
     sa.CheckConstraint("confidence IN ('high', 'medium', 'low', 'unknown')", name='ck_entity_confidence'),
@@ -122,7 +124,7 @@ def upgrade() -> None:
     sa.Column('consequence', sa.Text(), nullable=False),
     sa.Column('remediation', sa.Text(), nullable=False),
     sa.Column('stakeholder_function', sa.Text(), nullable=True),
-    sa.Column('fact_ids', sa.JSON().with_variant(postgresql.JSONB(astext_type=Text()), 'postgresql'), server_default='[]', nullable=False),
+    sa.Column('fact_ids', sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), 'postgresql'), server_default='[]', nullable=False),
     sa.Column('first_seen_at', sa.DateTime(timezone=True), nullable=False),
     sa.Column('resolved_at', sa.DateTime(timezone=True), nullable=True),
     sa.CheckConstraint("severity IN ('critical', 'high', 'medium', 'low')", name='ck_exposure_severity'),
@@ -139,9 +141,9 @@ def upgrade() -> None:
     sa.Column('target_entity_id', sa.String(length=32), nullable=False),
     sa.Column('kind', sa.String(length=24), nullable=False),
     sa.Column('confidence', sa.String(length=8), nullable=False),
-    sa.Column('is_inference', sa.Boolean(), server_default=sa.text('0'), nullable=False),
+    sa.Column('is_inference', sa.Boolean(), server_default=sa.text('false'), nullable=False),
     sa.Column('inferred_by', sa.Text(), nullable=True),
-    sa.Column('fact_ids', sa.JSON().with_variant(postgresql.JSONB(astext_type=Text()), 'postgresql'), server_default='[]', nullable=False),
+    sa.Column('fact_ids', sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), 'postgresql'), server_default='[]', nullable=False),
     sa.CheckConstraint("confidence IN ('high', 'medium', 'low', 'unknown')", name='ck_relationship_confidence'),
     sa.CheckConstraint("kind IN ('subdomain_of', 'resolves_to', 'runs_service', 'employee_of', 'reports_to', 'owns_budget_for', 'influences', 'incumbent_vendor_of', 'same_as')", name='ck_relationship_kind'),
     sa.CheckConstraint('is_inference = FALSE OR inferred_by IS NOT NULL', name='ck_relationship_inference_shows_method'),
@@ -158,7 +160,7 @@ def upgrade() -> None:
     sa.Column('analyst', sa.Text(), nullable=False),
     sa.Column('status', sa.String(length=24), nullable=False),
     sa.Column('stop_reason', sa.Text(), nullable=True),
-    sa.Column('skipped', sa.JSON().with_variant(postgresql.JSONB(astext_type=Text()), 'postgresql'), server_default='[]', nullable=False),
+    sa.Column('skipped', sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), 'postgresql'), server_default='[]', nullable=False),
     sa.Column('max_steps', sa.Integer(), nullable=False),
     sa.Column('max_spend_usd', sa.Numeric(precision=10, scale=4), nullable=False),
     sa.Column('max_wall_secs', sa.Integer(), nullable=False),
@@ -177,10 +179,10 @@ def upgrade() -> None:
     sa.Column('run_id', sa.String(length=32), nullable=False),
     sa.Column('question', sa.Text(), nullable=False),
     sa.Column('template', sa.Text(), nullable=True),
-    sa.Column('answers_attributes', sa.JSON().with_variant(postgresql.JSONB(astext_type=Text()), 'postgresql'), server_default='[]', nullable=False),
+    sa.Column('answers_attributes', sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), 'postgresql'), server_default='[]', nullable=False),
     sa.Column('status', sa.String(length=16), server_default='open', nullable=False),
     sa.Column('answer', sa.Text(), nullable=True),
-    sa.Column('fact_ids', sa.JSON().with_variant(postgresql.JSONB(astext_type=Text()), 'postgresql'), server_default='[]', nullable=False),
+    sa.Column('fact_ids', sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), 'postgresql'), server_default='[]', nullable=False),
     sa.Column('gap_reason', sa.Text(), nullable=True),
     sa.CheckConstraint("status IN ('open', 'answered', 'partial', 'unanswerable')", name='ck_pir_status'),
     sa.ForeignKeyConstraint(['run_id'], ['run.id'], ),
@@ -198,7 +200,7 @@ def upgrade() -> None:
     sa.Column('score', sa.Numeric(precision=5, scale=2), server_default='0', nullable=False),
     sa.Column('confidence', sa.String(length=8), nullable=False),
     sa.Column('detected_in_run', sa.String(length=32), nullable=False),
-    sa.Column('fact_ids', sa.JSON().with_variant(postgresql.JSONB(astext_type=Text()), 'postgresql'), server_default='[]', nullable=False),
+    sa.Column('fact_ids', sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), 'postgresql'), server_default='[]', nullable=False),
     sa.CheckConstraint("confidence IN ('high', 'medium', 'low', 'unknown')", name='ck_signal_confidence'),
     sa.ForeignKeyConstraint(['company_id'], ['entity.id'], ),
     sa.ForeignKeyConstraint(['detected_in_run'], ['run.id'], ),
@@ -240,7 +242,7 @@ def upgrade() -> None:
     sa.Column('run_id', sa.String(length=32), nullable=False),
     sa.Column('source_record_id', sa.String(length=32), nullable=False),
     sa.Column('confidence', sa.String(length=8), nullable=False),
-    sa.Column('is_inference', sa.Boolean(), server_default=sa.text('0'), nullable=False),
+    sa.Column('is_inference', sa.Boolean(), server_default=sa.text('false'), nullable=False),
     sa.Column('admiralty_source', sa.String(length=1), nullable=False),
     sa.Column('admiralty_claim', sa.String(length=1), nullable=False),
     sa.Column('sensitivity', sa.String(length=16), server_default='business', nullable=False),

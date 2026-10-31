@@ -14,7 +14,9 @@ services:
       POSTGRES_USER: neesha
       POSTGRES_PASSWORD: ${NEESHA_PG_PASSWORD:?set NEESHA_PG_PASSWORD}
     ports:
-      - "127.0.0.1:5432:5432"
+      # Host port is configurable and defaults off 5432, which is
+      # commonly already taken by another project's database.
+      - "127.0.0.1:${NEESHA_PG_PORT:-5433}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -34,9 +36,11 @@ services:
       - ./reports:/app/reports
     environment:
       NEESHA_DATABASE_URL: >-
-        postgresql+psycopg://neesha:${NEESHA_PG_PASSWORD:?set NEESHA_PG_PASSWORD}@postgres:5432/neesha
-      NEESHA_STORE_KEY: ${NEESHA_STORE_KEY:?set NEESHA_STORE_KEY}
-      NEESHA_PREFLIGHT_KEY: ${NEESHA_PREFLIGHT_KEY:?set NEESHA_PREFLIGHT_KEY}
+        postgresql+psycopg://neesha:${NEESHA_PG_PASSWORD:-neesha}@postgres:5432/neesha
+      # Enforced by the application, not here: EvidenceStore and
+      # PreflightGate both refuse to run without these and explain why.
+      NEESHA_STORE_KEY: ${NEESHA_STORE_KEY:-}
+      NEESHA_PREFLIGHT_KEY: ${NEESHA_PREFLIGHT_KEY:-}
     entrypoint: ["neesha"]
 
 volumes:
