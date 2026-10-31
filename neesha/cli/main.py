@@ -324,11 +324,18 @@ def posture(
 
 @app.command("collectors")
 def collectors_list() -> None:
-    """List available passive collectors."""
-    from neesha.collectors.registry import list_collectors
+    """List known collectors and their cost tier."""
+    from neesha.collectors.registry import DEFAULT_COLLECTORS, list_collectors
 
-    for name, description in list_collectors():
-        console.print(f"[bold]{name}[/bold] — {description}")
+    label = {
+        "A": "[green]A free[/green]",
+        "B": "[yellow]B metered[/yellow]",
+        "C": "[red]C authority-gated[/red]",
+        "D": "[dim]D contract-gated (disabled)[/dim]",
+    }
+    for name, tier, description in list_collectors():
+        default = " [dim](runs by default)[/dim]" if name in DEFAULT_COLLECTORS else ""
+        console.print(f"[bold]{name}[/bold] {label.get(tier, tier)} — {description}{default}")
 
 
 @app.command()
@@ -340,7 +347,12 @@ def passive(
     out: Path = typer.Option(Path("./reports"), "--out"),
 ) -> None:
     """Run passive OSINT collectors and write provenance-first evidence."""
-    from neesha.collectors.registry import PASSIVE_COLLECTORS, get_collector
+    from neesha.collectors.registry import (
+        DEFAULT_COLLECTORS,
+        RUNNABLE_COLLECTORS,
+        get_collector,
+        is_metered,
+    )
     from neesha.report import writer
 
     orch = Orchestrator(run_dir)
@@ -351,12 +363,27 @@ def passive(
         console.print(f"[red]blocked:[/red] {exc}")
         raise typer.Exit(1)
 
-    names = [n.strip() for n in sources.split(",") if n.strip()] if sources else list(PASSIVE_COLLECTORS)
-    unknown = [n for n in names if n not in PASSIVE_COLLECTORS]
+    # A bare invocation runs free Tier A sources only. Metered adapters have
+    # to be asked for by name: there is no budget ledger yet, so an implicit
+    # default that spent money would be unbounded. AUDIT.md S1.
+    names = (
+        [n.strip() for n in sources.split(",") if n.strip()]
+        if sources
+        else list(DEFAULT_COLLECTORS)
+    )
+    unknown = [n for n in names if n not in RUNNABLE_COLLECTORS]
     if unknown:
-        console.print(f"[red]unknown collectors: {', '.join(unknown)}[/red]")
-        console.print(f"available: {', '.join(PASSIVE_COLLECTORS)}")
+        console.print(f"[red]unknown or disabled collectors: {', '.join(unknown)}[/red]")
+        console.print(f"available: {', '.join(RUNNABLE_COLLECTORS)}")
+        console.print("[dim]`neesha collectors` lists every collector and its tier[/dim]")
         raise typer.Exit(1)
+
+    metered = [n for n in names if is_metered(n)]
+    if metered:
+        console.print(
+            f"[yellow]metered:[/yellow] {', '.join(metered)} will call paid APIs. "
+            "There is no budget ledger yet — spend is not capped."
+        )
 
     domain = normalize_domain(target)
     audit = AuditLog(run_dir / "audit.jsonl")

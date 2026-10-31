@@ -27,6 +27,13 @@ from neesha.scope.engine import ScopeEngine, ScopeViolation
 class Collector(ABC):
     name: ClassVar[str] = "collector"
     agent: ClassVar[str] = "collector"
+    # Cost tier, per the spec: A free/always-on, B metered, C manual and
+    # authority-gated, D contract-gated and disabled by default.
+    tier: ClassVar[str] = "A"
+    # The mode this collector actually operates in. record() stamps evidence
+    # with this rather than hardcoding "passive", so an active collector
+    # cannot file its results as passive. AUDIT.md B5.
+    collection_mode: ClassVar[CollectionMode] = CollectionMode.PASSIVE
 
     def __init__(
         self, scope: ScopeEngine, store: EvidenceStore, target: str, audit: Optional[AuditLog] = None
@@ -65,6 +72,7 @@ class Collector(ABC):
         source_grade: AdmiraltySourceGrade = AdmiraltySourceGrade.B,
         claim_grade: AdmiraltyClaimGrade = AdmiraltyClaimGrade.TWO,
         is_inference: bool = False,
+        mode: Optional[CollectionMode] = None,
     ) -> Evidence:
         """Write one Evidence record and return it (with its assigned id)."""
         evidence = Evidence(
@@ -76,7 +84,7 @@ class Collector(ABC):
             # the ledger or an exported report.
             source_url=redact_url(source_url) if source_url else None,
             source_type=source_type,
-            collection_mode=CollectionMode.PASSIVE,
+            collection_mode=mode or self.collection_mode,
             collector=self.name,
             agent=self.agent,
             scope_id=self.scope.scope.scope_id,

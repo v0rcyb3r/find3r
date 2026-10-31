@@ -57,6 +57,7 @@ class EnrichmentAdapter(PassiveCollector):
 class HunterAdapter(EnrichmentAdapter):
     name = "hunter"
     source = "hunter"
+    tier = "B"  # metered
     api_key_env = "HUNTER_API_KEY"
     description = "Hunter.io email discovery (HUNTER_API_KEY)"
 
@@ -90,6 +91,7 @@ class HunterAdapter(EnrichmentAdapter):
 class ApolloAdapter(EnrichmentAdapter):
     name = "apollo"
     source = "apollo"
+    tier = "B"  # metered
     api_key_env = "APOLLO_API_KEY"
     description = "Apollo.io people search (APOLLO_API_KEY)"
 
@@ -119,6 +121,7 @@ class ApolloAdapter(EnrichmentAdapter):
 class ZoomInfoAdapter(EnrichmentAdapter):
     name = "zoominfo"
     source = "zoominfo"
+    tier = "D"  # contract-gated, disabled by default
     api_key_env = "ZOOMINFO_API_KEY"
     description = "ZoomInfo (enterprise OAuth; adapter reserved)"
 
