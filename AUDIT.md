@@ -446,6 +446,27 @@ rewriting it is the first substantive item of Phase 1 (see §7).
   phone, per the spec's own wording. Company-first: people appear as roles
   attached to an organization, never as subjects of their own dossier.
 
+### Amendment — dossiers (2026-10-31)
+
+The dossier is a first-class output, kept deliberately broad. What may
+populate it is bounded by the run's authority basis rather than by taste:
+
+- **Company dossier** on `prospect_company` authority — infrastructure,
+  attack surface, exposures, tech stack, business signals, people as business
+  roles, power map. The default product.
+- **Business-contact detail** on `prospect_company` — role, business email,
+  business phone, office location.
+- **Tier C inputs** (DeHashed, Intelligence X, Sherlock, Blackbird,
+  WhatsMyName) require `client_engagement:<id>` whose scope permits them.
+  They enumerate an individual's personal footprint or breach records:
+  legitimate assessment scope against a client's own staff under a signed
+  engagement, not available for prospect research. Company-level breach
+  aggregates remain available on prospect authority; record-level contents
+  are never exported.
+
+The gate enforces the split, so the capability exists without the
+prospect-research path being open.
+
 ### Consequence for the data model (delivery step 2)
 
 The step-2 tables are the nine the spec names and nothing more: `company`,
