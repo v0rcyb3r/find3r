@@ -1,8 +1,13 @@
 """Minimal local read-only web dashboard for the Intelligence Console.
 
 Serves a single-page view of the evidence store and the reports directory on
-127.0.0.1 only (local mode: no ports beyond loopback). This is a preview of
-the console, not the Phase 12 Sales surface.
+127.0.0.1 only (local mode: no ports beyond loopback).
+
+Interim surface. It is scheduled for replacement by the React app and carries
+two known limitations until then: no authentication (loopback only is the
+whole of its access control), and Mermaid is loaded from a CDN, which is an
+external request from a tool that is otherwise air-gappable. Do not expose
+this beyond loopback. AUDIT.md B4.
 """
 from __future__ import annotations
 
@@ -56,12 +61,13 @@ def _page(title: str, body: str, back: bool = True) -> str:
         f"<title>{_escape(title)}</title><style>{_STYLE}</style>"
         "<script src='https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js'></script>"
         "</head><body>" + back_link + f"<main>{body}</main>"
-        "<script>mermaid.initialize({{startOnLoad:true, theme:'neutral'}});</script></body></html>"
+        "<script>mermaid.initialize({startOnLoad:true, theme:'neutral'});</script></body></html>"
     )
 
 
 def _home(data_dir: Path) -> str:
-    targets = EvidenceStore(data_dir / "evidence.sqlite3").list_targets()
+    with EvidenceStore(data_dir / "evidence.sqlite3") as store:
+        targets = store.list_targets()
     if not targets:
         body = "<div class='card'><h2>No data yet</h2><p class='muted'>Run <code>neesha run &lt;domain&gt;</code> to collect a target, then reload.</p></div>"
         return _page("Neesha", body, back=False)
@@ -70,6 +76,11 @@ def _home(data_dir: Path) -> str:
     )
     body = f"<div class='card'><h2>Targets</h2><ul>{rows}</ul></div>"
     return _page("Neesha", body, back=False)
+
+
+def known_targets(data_dir: Path) -> list[str]:
+    with EvidenceStore(data_dir / "evidence.sqlite3") as store:
+        return store.list_targets()
 
 
 def _target_page(data_dir: Path, reports_dir: Path, target: str) -> str:
@@ -124,10 +135,8 @@ def _target_page(data_dir: Path, reports_dir: Path, target: str) -> str:
             f"<li>{_escape(r.get('relationship_type',''))} (evidence: {len(r.get('evidence_ids', []))})</li>"
             for r in (relationships or [])
         )
-        graph_html = (
-            f"<pre class='mermaid'>{_escape(graph)}</pre><pre class='muted'>{_escape(graph)}</pre>"
-            if graph else ""
-        )
+        graph_html = f"<pre class='mermaid'>{_escape(graph)}</pre>" if graph else ""
+
         cards.append(
             f"<div class='card'><h2>Entities ({len(entities)})</h2>"
             f"<table><tr><th>type</th><th>name</th><th>conf</th></tr>{ent_rows}</table>"
@@ -153,7 +162,14 @@ def make_handler(data_dir: Path, reports_dir: Path):
             if path in ("/", "/index.html"):
                 self._send(_home(data_dir))
             elif path.startswith("/target/"):
-                self._send(_target_page(data_dir, reports_dir, path[len("/target/"):]))
+                requested = path[len("/target/"):]
+                # Allowlist, not sanitization: the only readable targets are
+                # ones the evidence store actually knows about, so a crafted
+                # path cannot escape the reports directory. AUDIT.md B2.
+                if requested not in known_targets(data_dir):
+                    self.send_error(404)
+                    return
+                self._send(_target_page(data_dir, reports_dir, requested))
             else:
                 self.send_error(404)
 

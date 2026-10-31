@@ -6,7 +6,6 @@ drill-down), per the "never show a grade without the underlying record" rule.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
 
 from pydantic import BaseModel, Field
 

@@ -1,7 +1,6 @@
 import neesha.collectors.enrichment as enrich_mod
 from neesha.collectors.enrichment import (
     ApolloAdapter,
-    EnrichmentRouter,
     HunterAdapter,
 )
 from neesha.evidence.models import AdmiraltyClaimGrade, AdmiraltySourceGrade, Confidence
@@ -54,12 +53,3 @@ def test_apollo_parses_people(tmp_path, monkeypatch):
     evs = collector.run()
     assert "Jane Doe" in evs[0].claim
     assert store.count() == 1
-
-
-def test_router_email_hunter_first():
-    assert EnrichmentRouter.route("email")[0] == "hunter"
-
-
-def test_router_enterprise_people_zoominfo_first():
-    assert EnrichmentRouter.route("people", enterprise=True)[0] == "zoominfo"
-    assert EnrichmentRouter.route("people", enterprise=False)[0] == "apollo"

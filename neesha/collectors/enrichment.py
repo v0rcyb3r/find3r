@@ -130,16 +130,3 @@ class ZoomInfoAdapter(EnrichmentAdapter):
         # plain API key is not a supported path. Skip honestly rather than
         # fabricate a request that cannot work.
         return self._error("ZoomInfo requires enterprise OAuth; direct-call adapter not implemented")
-
-
-class EnrichmentRouter:
-    """Multi-provider routing: Hunter first for email, ZoomInfo for enterprise
-    people where economics justify, Apollo as fallback."""
-
-    @staticmethod
-    def route(task: str, enterprise: bool = False) -> list[str]:
-        if task == "people" and enterprise:
-            return ["zoominfo", "apollo", "hunter"]
-        if task == "email":
-            return ["hunter", "apollo", "zoominfo"]
-        return ["apollo", "hunter", "zoominfo"]

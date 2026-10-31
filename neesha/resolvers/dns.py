@@ -140,7 +140,6 @@ def dnssec_status(resolvers: list[DoHResolver], domain: str) -> tuple[str, Optio
         result = resolver.query(domain, "DNSKEY")
         if result.status == "error":
             continue
-        keys_present = any("DNSKEY" == rec.rtype or rec.value for rec in result.records)
         keys_present = bool(result.records)
         if result.ad and keys_present:
             return "validated", True, True
