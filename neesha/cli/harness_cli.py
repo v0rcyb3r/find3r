@@ -241,7 +241,10 @@ def harness_run(
         help="If no engagement covers the target, record a scoped operator "
              "engagement for it automatically (passive authority only).",
     ),
-    days: int = typer.Option(30, "--days", help="Validity of a self-authorized engagement"),
+    days: int = typer.Option(
+        30, "--days", min=1, max=90,
+        help="Validity (days, 1-90) of a self-authorized engagement",
+    ),
     max_steps: int = typer.Option(25, "--max-steps"),
     max_spend: float = typer.Option(1.00, "--max-spend", help="Per-run USD cap"),
     max_seconds: int = typer.Option(600, "--max-seconds"),
