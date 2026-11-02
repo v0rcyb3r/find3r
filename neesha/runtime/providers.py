@@ -100,20 +100,39 @@ class ProviderConfig:
         return cls(name=name, model=model, api_key=key)
 
 
+def _call_cap_configured(name: str, env: Mapping[str, str]) -> bool:
+    """A positive per-call USD cap is required before analysis will run.
+
+    Checked here so a provider is not reported ready while an analysis run
+    would immediately fail for want of its cap. Kept as a local numeric check
+    to avoid importing the runtime executor (which imports this module).
+    """
+    from decimal import Decimal, InvalidOperation
+    try:
+        amount = Decimal(str(env.get(f'NEESHA_{name.upper()}_CALL_CAP_USD', '')))
+    except (InvalidOperation, ValueError, TypeError):
+        return False
+    return amount.is_finite() and amount > 0
+
+
 def provider_readiness(environ: Mapping[str, str] | None = None) -> list[dict]:
     """Return configuration status only. Does not verify account/model access."""
     env = os.environ if environ is None else environ
     result = []
     for name, contract in API_CONTRACTS.items():
+        cap_env = f'NEESHA_{name.upper()}_CALL_CAP_USD'
         try:
             config = ProviderConfig.from_env(name, env)
-            ready, reason, model = True, 'Configured; account and model access not tested.', config.model
+            if _call_cap_configured(name, env):
+                ready, reason, model = True, 'Configured; account and model access not tested.', config.model
+            else:
+                ready, reason, model = False, f'Set a positive per-call cap in {cap_env} before analysis.', config.model
         except ProviderError as exc:
             ready, reason, model = False, str(exc), None
         result.append({
             'provider': name, 'ready': ready, 'reason': reason, 'model': model,
             'key_env': contract['key_env'], 'model_env': contract['model_env'],
-            'checked_date': CHECKED_DATE, 'docs': contract['docs'],
+            'cap_env': cap_env, 'checked_date': CHECKED_DATE, 'docs': contract['docs'],
         })
     return result
 

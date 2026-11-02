@@ -77,6 +77,12 @@ def test_environment_configuration_has_no_model_or_key_defaults(monkeypatch):
     env['NEESHA_OPENAI_MODEL'] = 'chosen-explicitly'
     config = p.ProviderConfig.from_env('openai', env)
     assert config.model == 'chosen-explicitly'
+    # Key + model alone is not "ready": analysis also needs a per-call cap, so
+    # the provider must not be reported ready while a run would fail for it.
+    readiness = p.provider_readiness(env)
+    assert not readiness[0]['ready']
+    assert 'CALL_CAP_USD' in readiness[0]['reason']
+    env['NEESHA_OPENAI_CALL_CAP_USD'] = '0.02'
     readiness = p.provider_readiness(env)
     assert readiness[0]['ready']
     assert readiness[0]['model'] == 'chosen-explicitly'
