@@ -29,6 +29,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import ClassVar
@@ -92,7 +93,25 @@ class AccountEnumAdapter(BaseAdapter):
 
     # ---- subprocess, hardened like the Subfinder runner ------------------
 
-    def _run(self, args: list[str], work_dir: Path) -> bytes:
+    @contextmanager
+    def _temp_cwd(self):
+        """A throwaway 0700 working directory, removed when the call returns.
+
+        The tools can write report files (found profile URLs — PII) next to
+        their output. Running inside a per-invocation temp dir that is then
+        deleted means none of that persists outside the harness, and the
+        subprocess cwd is never the user's home.
+        """
+        base = PROJECT_ROOT / ".tools" / self.name
+        base.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=base) as tmp:
+            try:
+                os.chmod(tmp, 0o700)
+            except OSError:
+                pass
+            yield Path(tmp)
+
+    def _run(self, args: list[str], cwd: Path) -> bytes:
         status = self.availability()
         if not status["available"]:
             raise AdapterError(status["reason"])
@@ -102,8 +121,8 @@ class AccountEnumAdapter(BaseAdapter):
             "SSL_CERT_FILE", "SSL_CERT_DIR",
         )}
         try:
-            with tempfile.TemporaryFile(dir=work_dir) as output:
-                self._drain(args, env, output)
+            with tempfile.TemporaryFile(dir=cwd) as output:
+                self._drain(args, env, output, cwd)
                 output.seek(0)
                 return output.read(self.max_output_bytes + 1)
         except AdapterError:
@@ -111,9 +130,9 @@ class AccountEnumAdapter(BaseAdapter):
         except (OSError, ValueError) as exc:
             raise AdapterError(f"{self.name} could not run; inspect the local tool installation") from exc
 
-    def _drain(self, args, env, output) -> None:
+    def _drain(self, args, env, output, cwd) -> None:
         process = subprocess.Popen(
-            args, cwd=env.get("HOME", str(PROJECT_ROOT)), env=env,
+            args, cwd=str(cwd), env=env,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True,
         )
         total = 0

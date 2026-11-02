@@ -9,10 +9,9 @@ Reference: https://github.com/iojw/socialscan
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import ClassVar
 
-from neesha.adapters.account_enum import PROJECT_ROOT, AccountEnumAdapter
+from neesha.adapters.account_enum import AccountEnumAdapter
 from neesha.adapters.base import AdapterError, FactDraft, RawResult, Reference, Request
 from neesha.adapters.email_public import normalize_email
 
@@ -25,19 +24,12 @@ class SocialscanAdapter(AccountEnumAdapter):
 
     def fetch(self, reference: Reference) -> RawResult:
         subject = normalize_email(reference.label)
-        work_dir = PROJECT_ROOT / ".tools" / "socialscan"
-        work_dir.mkdir(parents=True, exist_ok=True)
-        report = work_dir / "report.json"
-        # Write JSON to a controlled temp path inside the isolated work dir.
-        args = [self.binary(), subject, "--json", str(report)]
-        try:
-            self._run(args, work_dir)
+        with self._temp_cwd() as cwd:
+            # Write JSON into the throwaway dir; it is removed with the dir.
+            report = cwd / "report.json"
+            args = [self.binary(), subject, "--json", str(report)]
+            self._run(args, cwd)
             raw = report.read_bytes()[: self.max_output_bytes + 1] if report.exists() else b"[]"
-        finally:
-            try:
-                report.unlink(missing_ok=True)
-            except OSError:
-                pass
         return self._sanitized(subject, self._parse_json(raw), reference)
 
     @staticmethod

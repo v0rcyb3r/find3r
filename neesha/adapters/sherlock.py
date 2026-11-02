@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import ClassVar
 
-from neesha.adapters.account_enum import PROJECT_ROOT, AccountEnumAdapter, normalize_subject
+from neesha.adapters.account_enum import AccountEnumAdapter, normalize_subject
 from neesha.adapters.base import FactDraft, RawResult, Reference, Request
 
 
@@ -40,11 +40,12 @@ class SherlockAdapter(AccountEnumAdapter):
 
     def fetch(self, reference: Reference) -> RawResult:
         subject = normalize_subject("username", reference.label)
-        work_dir = PROJECT_ROOT / ".tools" / "sherlock"
-        work_dir.mkdir(parents=True, exist_ok=True)
-        args = [self.binary(), "--print-found", "--no-color", "--timeout", "10",
-                "--folderoutput", str(work_dir), subject]
-        output = self._run(args, work_dir)
+        with self._temp_cwd() as cwd:
+            # --no-txt: do not persist a report; we parse --print-found stdout.
+            # The throwaway cwd catches any stray write and is then removed.
+            args = [self.binary(), "--print-found", "--no-color", "--no-txt",
+                    "--timeout", "10", subject]
+            output = self._run(args, cwd)
         return self._sanitized(subject, parse_found_sites(output, self.max_services), reference)
 
     def parse(self, raw: RawResult, request: Request) -> list[FactDraft]:

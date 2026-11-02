@@ -8,10 +8,9 @@ Reference: https://github.com/megadose/holehe
 """
 from __future__ import annotations
 
-from pathlib import Path
 from typing import ClassVar
 
-from neesha.adapters.account_enum import PROJECT_ROOT, AccountEnumAdapter
+from neesha.adapters.account_enum import AccountEnumAdapter
 from neesha.adapters.base import FactDraft, RawResult, Reference, Request
 from neesha.adapters.email_public import normalize_email
 
@@ -24,11 +23,10 @@ class HoleheAdapter(AccountEnumAdapter):
 
     def fetch(self, reference: Reference) -> RawResult:
         subject = normalize_email(reference.label)
-        work_dir = PROJECT_ROOT / ".tools" / "holehe"
-        work_dir.mkdir(parents=True, exist_ok=True)
-        # --only-used limits noise; --no-color keeps stdout machine-parseable.
-        args = [self.binary(), "--only-used", "--no-color", subject]
-        output = self._run(args, work_dir)
+        with self._temp_cwd() as cwd:
+            # --only-used limits noise; --no-color keeps stdout machine-parseable.
+            args = [self.binary(), "--only-used", "--no-color", subject]
+            output = self._run(args, cwd)
         return self._sanitized(subject, self._parse_stdout(output), reference)
 
     @staticmethod

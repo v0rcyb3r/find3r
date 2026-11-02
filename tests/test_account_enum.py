@@ -228,3 +228,36 @@ def test_username_run_end_to_end_under_a_client_engagement(engine):
     accounts = [n for n in brief["graph"]["nodes"] if n["kind"] == "account"]
     assert {n["label"] for n in accounts} == {"github", "reddit"}
     assert any(f["attribute"] == "public.account.found" for f in brief["facts"])
+
+
+def test_maigret_constrains_scope_and_sherlock_suppresses_reports(monkeypatch):
+    captured = {}
+
+    def fake_run(self, args, cwd):
+        captured["args"] = args
+        return b""
+
+    monkeypatch.setattr(MaigretAdapter, "binary", classmethod(lambda c: "/usr/bin/true"))
+    monkeypatch.setattr(MaigretAdapter, "_run", fake_run)
+    MaigretAdapter().fetch(Reference(url="tool://maigret/jdoe", origin_url="tool://maigret/", label="jdoe"))
+    assert "--no-recursion" in captured["args"] and "--no-extracting" in captured["args"]
+
+    monkeypatch.setattr(SherlockAdapter, "binary", classmethod(lambda c: "/usr/bin/true"))
+    monkeypatch.setattr(SherlockAdapter, "_run", fake_run)
+    SherlockAdapter().fetch(Reference(url="tool://sherlock/jdoe", origin_url="tool://sherlock/", label="jdoe"))
+    assert "--no-txt" in captured["args"]
+
+
+def test_tool_working_directory_is_removed_after_fetch(monkeypatch):
+    seen = {}
+
+    def fake_run(self, args, cwd):
+        # Simulate a tool persisting a report file next to its output.
+        (cwd / "report_jdoe_simple.json").write_text("{}")
+        seen["cwd"] = cwd
+        return b""
+
+    monkeypatch.setattr(MaigretAdapter, "binary", classmethod(lambda c: "/usr/bin/true"))
+    monkeypatch.setattr(MaigretAdapter, "_run", fake_run)
+    MaigretAdapter().fetch(Reference(url="tool://maigret/jdoe", origin_url="tool://maigret/", label="jdoe"))
+    assert not seen["cwd"].exists()  # the throwaway dir and any report are gone

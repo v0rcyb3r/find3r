@@ -25,12 +25,15 @@ class MaigretAdapter(AccountEnumAdapter):
 
     def fetch(self, reference: Reference) -> RawResult:
         subject = normalize_subject("username", reference.label)
-        work_dir = PROJECT_ROOT / ".tools" / "maigret"
-        work_dir.mkdir(parents=True, exist_ok=True)
-        # --no-color keeps stdout parseable; -T limits per-site time. Reports are
-        # written under the isolated work dir and never read back for detail.
-        args = [self.binary(), "--no-color", "--timeout", "10", "--folderoutput", str(work_dir), subject]
-        output = self._run(args, work_dir)
+        with self._temp_cwd() as cwd:
+            # --no-recursion / --no-extracting keep the run to the one authorized
+            # username: Maigret must not pivot to identifiers it discovers, since
+            # any such pivot is a new gated step, not a free extension of scope.
+            # --no-color keeps stdout parseable; reports land in the throwaway
+            # dir and are removed with it.
+            args = [self.binary(), "--no-color", "--no-recursion", "--no-extracting",
+                    "--timeout", "10", "--folderoutput", str(cwd), subject]
+            output = self._run(args, cwd)
         return self._sanitized(subject, parse_found_sites(output, self.max_services), reference)
 
     def parse(self, raw: RawResult, request: Request) -> list[FactDraft]:
