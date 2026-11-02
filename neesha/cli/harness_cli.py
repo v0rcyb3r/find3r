@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
 from typing import Optional
 from uuid import uuid4
 
@@ -219,6 +220,7 @@ def harness_run(
     max_steps: int = typer.Option(25, "--max-steps"),
     max_spend: float = typer.Option(1.00, "--max-spend", help="Per-run USD cap"),
     max_seconds: int = typer.Option(600, "--max-seconds"),
+    out: Path = typer.Option(Path("reports"), "--out", help="Briefing output directory"),
 ) -> None:
     """Run one intelligence cycle against a company."""
     engine = get_engine()
@@ -262,6 +264,10 @@ def harness_run(
         raise typer.Exit(1)
 
     _print_report(report)
+    from neesha.harness.brief import write_brief
+
+    for path in write_brief(engine, report.run_id, out):
+        console.print(f"briefing: {path}")
 
 
 def _resolve_engagement(engine: sa.Engine, engagement_id: Optional[str]) -> EngagementView:
@@ -290,6 +296,7 @@ def _resolve_engagement(engine: sa.Engine, engagement_id: Optional[str]) -> Enga
         authority_basis=row.authority_basis,
         permitted_techniques=frozenset(row.permitted_techniques or []),
         authorized_domains=tuple(row.authorized_domains or []),
+        authorized_emails=tuple(row.authorized_emails or []),
         starts_at=_aware(row.starts_at),
         expires_at=_aware(row.expires_at),
     )
@@ -338,3 +345,15 @@ def _print_report(report) -> None:
         for entry in report.skipped:
             console.print(f"  - {entry['adapter']}: {entry['reason'][:80]}")
     console.print(f"[dim]run {report.run_id}[/dim]")
+
+
+@harness_app.command('serve')
+def harness_serve(
+    port: int = typer.Option(8765, '--port', min=1, max=65535),
+) -> None:
+    """Open the local investigator workspace (loopback only)."""
+    from neesha.console.server import serve
+
+    engine = get_engine()
+    _require_schema(engine)
+    serve(engine, port=port)

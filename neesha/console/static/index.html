@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>NEESHA · Intelligence workspace</title><link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script>
+</head>
+<body>
+<aside class="rail">
+  <a class="brand" href="/" aria-label="NEESHA home"><span class="brand-symbol">N<span></span></span></a>
+  <button class="rail-button active" id="home" aria-label="Investigations" title="Investigations">▦</button>
+  <button class="rail-button" id="harness-nav" aria-label="Agent harness" title="Agent harness">≋</button>
+  <div class="rail-bottom"><span class="local-dot"></span><span class="rail-label">LOCAL</span></div>
+</aside>
+<div class="shell">
+<header><a class="wordmark" href="/">NEESHA<span>INTELLIGENCE SYSTEMS</span></a><div class="top-status"><span class="local-dot"></span> LOCAL WORKSPACE <span class="divider">/</span> <time id="clock">— UTC</time></div></header>
+<main>
+  <div class="eyebrow breadcrumb">WORKSPACE <span>/</span> INVESTIGATIONS</div>
+  <section id="landing">
+    <div class="heading-row"><div><div class="eyebrow">CLARITY THROUGH EVIDENCE</div><h1>Evidence. Context.<br><span>A clearer picture.</span></h1><p class="intro">Investigate a company or an email address.<br>Keep the observation, its source, and the uncertainty together.</p></div><div class="process-index" aria-label="Investigation process"><div><span>01</span> COLLECT <small>Bounded public sources</small></div><div><span>02</span> VERIFY <small>Source records and citations</small></div><div><span>03</span> ANALYZE <small>Rules or selected models</small></div></div></div>
+    <form id="investigate" class="investigation-box">
+      <div class="box-title"><span class="eyebrow">NEW INVESTIGATION</span><span class="tag">DOMAIN · WEBSITE · EMAIL</span></div>
+      <div class="search-row"><span class="search-icon" aria-hidden="true">⌕</span><input id="domain" name="domain" type="text" placeholder="Enter a domain, website, or email address" aria-label="Domain, website, or email address" required autocomplete="off" spellcheck="false"><button class="primary" id="launch" type="submit">Investigate <span>↗</span></button></div>
+      <div class="form-options"><label class="contact-option"><input id="website" type="checkbox" checked> Read public company website</label><label class="contact-option"><input id="contacts" type="checkbox"> Add paid company enrichment <span class="tag">OPTIONAL · $1 CAP</span></label></div>
+      <p id="seed-notice" class="notice" hidden>Email research is independent of a company. Domain mail configuration describes the provider, not the person’s security posture.</p>
+      <p id="form-message" class="form-message" role="status">Free sources run by default. Website reads are visible in the company’s logs.</p>
+    </form>
+    <section class="harness-config" id="harness-config" aria-labelledby="harness-title">
+      <div class="harness-heading"><div><div class="eyebrow">EXECUTION CONTROL</div><h2 id="harness-title">Agent Harness</h2></div><span class="tag" id="harness-readiness">CHECKING PROVIDERS</span></div>
+      <p class="notice">Collection uses the source adapters. Optional models analyze the resulting evidence; they cannot browse, run tools, or change source records.</p>
+      <fieldset class="mode-switch"><legend class="sr-only">Analysis mode</legend><label><input type="radio" name="harness-mode" value="deterministic" checked><span>Deterministic<small>Collection + evidence rules · no model calls</small></span></label><label><input type="radio" name="harness-mode" value="single"><span>Single model<small>One cited synthesis · one model call</small></span></label><label><input type="radio" name="harness-mode" value="multi"><span>Multi-model<small>Two specialists + reviewer · up to three calls</small></span></label></fieldset>
+      <div id="harness-providers" class="provider-grid"></div><p id="harness-note" class="notice" role="status">Deterministic mode works without runtime API keys.</p><div id="harness-rollout" aria-live="polite"></div>
+    </section>
+    <details class="source-network"><summary><span>Collection network</span><span id="source-count" class="eyebrow">CHECKING SOURCES</span></summary><div id="source-catalog" class="source-grid"></div></details>
+    <div class="section-heading"><h2>Recent investigations <span id="run-count">00</span></h2><span class="eyebrow">LATEST ACTIVITY</span></div>
+    <div id="runs" class="runs"><div class="empty"><span class="empty-cross">＋</span><h3>A clear starting point.</h3><p>Your investigations will appear here.<br>Enter a domain or email above to begin.</p></div></div>
+  </section>
+  <section id="detail" hidden>
+    <button id="back" class="back">← All investigations</button>
+    <div class="detail-heading"><div><div class="eyebrow" id="subject-kind">COMPANY INTELLIGENCE</div><h1 id="company-title"></h1><p id="run-meta" class="mono muted"></p></div><div class="export-actions"><button class="secondary" id="export-report">Export report ↓</button><button class="secondary" id="export">JSON ↓</button><button class="danger-button" id="delete-run">Delete investigation</button></div></div>
+    <div class="metrics" id="metrics"></div>
+    <div class="tabs" role="tablist" aria-label="Investigation views"><button role="tab" aria-selected="true" data-tab="overview">Overview</button><button role="tab" aria-selected="false" data-tab="infrastructure">Infrastructure</button><button role="tab" aria-selected="false" data-tab="people">People & roles</button><button role="tab" aria-selected="false" data-tab="graph">Evidence graph</button><button role="tab" aria-selected="false" data-tab="evidence">Evidence</button><button role="tab" aria-selected="false" data-tab="analysis">Agent Harness</button></div>
+    <div id="view"></div>
+  </section>
+  <footer><span>NEESHA <span class="footer-slash">/</span> ANALYST WORKSPACE</span><span>EVIDENCE FIRST. INFERENCE LABELED.</span><span id="budget">LOCAL · PRIVATE</span></footer>
+</main>
+</div>
+<dialog id="source-dialog"><div class="dialog-head"><span class="eyebrow">SOURCE RECORD</span><button id="close-source" aria-label="Close source record">×</button></div><div id="source-content"></div></dialog>
+<dialog id="delete-dialog"><div class="dialog-head"><span class="eyebrow">DELETE STORED INVESTIGATION</span><button id="close-delete" aria-label="Cancel deletion">×</button></div><h2 id="delete-title"></h2><p class="notice">This deletes the selected investigation, matching caches, and NEESHA-managed reports. This action cannot be undone. Spent-budget totals remain. Independent backups and previously downloaded exports are not erased.</p><p id="delete-message" class="notice" role="status"></p><div class="export-actions"><button class="secondary" id="cancel-delete">Cancel</button><button class="danger-button" id="confirm-delete">Delete stored investigation</button></div></dialog>
+</body>
+</html>
