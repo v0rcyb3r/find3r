@@ -861,3 +861,62 @@ def test_repository_purge_classmethod_removes_expired_without_run_context(
     with engine.connect() as conn:
         assert conn.execute(sa.select(sa.func.count()).select_from(schema.fact)).scalar() == 0
         assert conn.execute(sa.select(sa.func.count()).select_from(schema.source_record)).scalar() == 0
+
+
+def test_harness_cli_self_authorizes_a_target_with_no_engagement(
+    engine, no_network, monkeypatch, tmp_path
+):
+    """With no engagement in force, the CLI records a scoped operator
+    engagement for the target and proceeds, rather than refusing. The
+    self-authorization is prospect authority and is itself on the record."""
+    from typer.testing import CliRunner
+    from neesha.cli.harness_cli import harness_app
+
+    monkeypatch.setenv('NEESHA_DATABASE_URL', str(engine.url))
+    output = tmp_path / 'briefs'
+    result = CliRunner().invoke(harness_app, ['run', 'acme.com', '--out', str(output)])
+    assert result.exit_code == 0, result.output
+    assert 'self-authorized' in result.output
+
+    with engine.connect() as conn:
+        rows = conn.execute(sa.select(
+            schema.engagement.c.authority_basis, schema.engagement.c.authorized_by,
+            schema.engagement.c.authorized_domains,
+        )).all()
+    assert len(rows) == 1
+    assert rows[0].authority_basis == 'prospect_company'
+    assert rows[0].authorized_by.startswith('operator-self-authorized:')
+    assert rows[0].authorized_domains == ['acme.com']
+    (json_path,) = output.glob('*.json')
+    assert json.loads(json_path.read_text())['facts']
+
+
+def test_harness_cli_self_authorization_is_not_client_authority(
+    engine, no_network, monkeypatch, tmp_path
+):
+    """Self-authorization must never grant the client-engagement authority the
+    tier-C person-enumeration sources require, so those stay gated."""
+    from typer.testing import CliRunner
+    from neesha.cli.harness_cli import harness_app
+
+    monkeypatch.setenv('NEESHA_DATABASE_URL', str(engine.url))
+    CliRunner().invoke(harness_app, ['run', 'acme.com', '--out', str(tmp_path / 'b')])
+    with engine.connect() as conn:
+        bases = set(conn.execute(sa.select(schema.engagement.c.authority_basis)).scalars())
+    assert 'client_engagement' not in bases
+
+
+def test_harness_cli_refuses_self_authorization_when_disabled(
+    engine, no_network, monkeypatch, tmp_path
+):
+    from typer.testing import CliRunner
+    from neesha.cli.harness_cli import harness_app
+
+    monkeypatch.setenv('NEESHA_DATABASE_URL', str(engine.url))
+    result = CliRunner().invoke(
+        harness_app, ['run', 'acme.com', '--no-self-authorize', '--out', str(tmp_path / 'b')]
+    )
+    assert result.exit_code == 1
+    assert 'no engagement covers this target' in result.output
+    with engine.connect() as conn:
+        assert conn.execute(sa.select(sa.func.count()).select_from(schema.engagement)).scalar() == 0

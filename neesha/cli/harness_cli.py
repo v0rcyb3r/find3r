@@ -40,18 +40,24 @@ AUTHORITY_BASES = ("own_org", "prospect_company", "client_engagement")
 
 def get_engine() -> sa.Engine:
     url = os.environ.get("NEESHA_DATABASE_URL") or DEFAULT_DATABASE_URL
-    if url.startswith("sqlite"):
+    parsed = sa.engine.make_url(url)
+    if parsed.get_backend_name() == "sqlite" and parsed.database and parsed.database != ":memory:":
         from neesha.config import harden_path
 
-        data = Path("./data")
-        data.mkdir(parents=True, exist_ok=True)
+        db = Path(parsed.database)
+        db.parent.mkdir(parents=True, exist_ok=True)
         # Owner-only: the SQLite file is unencrypted and holds personal data.
-        harden_path(data)
-        db = data / "neesha.sqlite3"
+        harden_path(db.parent)
         engine = sa.create_engine(url)
-        # The file is created lazily on first connect, so harden it then
-        # rather than now, when it may not exist yet.
-        sa.event.listen(engine, "connect", lambda *_: harden_path(db))
+
+        def _harden(*_):
+            # The database and its WAL/SHM/journal sidecars are created lazily,
+            # so harden them on connect, when they exist.
+            harden_path(db)
+            for suffix in ("-wal", "-shm", "-journal"):
+                harden_path(db.with_name(db.name + suffix))
+
+        sa.event.listen(engine, "connect", _harden)
         return engine
     return sa.create_engine(url)
 
@@ -230,29 +236,62 @@ def harness_run(
         None, "--approve",
         help="Adapter name an analyst approves to run (e.g. a tier-C source); repeatable",
     ),
+    self_authorize: bool = typer.Option(
+        True, "--self-authorize/--no-self-authorize",
+        help="If no engagement covers the target, record a scoped operator "
+             "engagement for it automatically (passive authority only).",
+    ),
+    days: int = typer.Option(30, "--days", help="Validity of a self-authorized engagement"),
     max_steps: int = typer.Option(25, "--max-steps"),
     max_spend: float = typer.Option(1.00, "--max-spend", help="Per-run USD cap"),
     max_seconds: int = typer.Option(600, "--max-seconds"),
     out: Path = typer.Option(Path("reports"), "--out", help="Briefing output directory"),
 ) -> None:
-    """Run one intelligence cycle against a company."""
+    """Run one intelligence cycle against a company domain or exact email."""
     engine = get_engine()
     _require_schema(engine)
+    who = analyst or os.environ.get("USER", "analyst")
 
-    view = _resolve_engagement(engine, engagement_id, company)
+    if engagement_id:
+        view = _resolve_engagement(engine, engagement_id, company)
+    else:
+        view = _covering_engagement(engine, company)
+        if view is None and self_authorize:
+            try:
+                view, subject = _self_authorize(engine, company, who, days)
+            except ValueError as exc:
+                console.print(f"[red]cannot self-authorize:[/red] {exc}")
+                raise typer.Exit(1)
+            console.print(
+                f"[dim]self-authorized {view.authority_basis} research for "
+                f"{subject} as {who}; engagement {view.id[:12]}, logged.[/dim]"
+            )
+        elif view is None:
+            console.print(
+                "[red]no engagement covers this target[/red] and self-authorization "
+                "is off. Create one, or drop --no-self-authorize."
+            )
+            raise typer.Exit(1)
+
     if not view.covers(company):
         console.print(
             f"[red]blocked:[/red] engagement {view.id[:12]} does not authorize "
             f"{company!r}"
         )
         console.print(
-            f"  authorized: {', '.join(view.authorized_domains) or 'nothing'}"
+            f"  authorized: {', '.join(view.authorized_domains + view.authorized_emails) or 'nothing'}"
         )
         raise typer.Exit(1)
 
+    # Self-authorization never confers client-engagement authority or active
+    # techniques, so the tier-C person-enumeration sources and active
+    # collection stay gated exactly as before — this only removes setup for
+    # the passive prospect/public research an operator is entitled to run.
+    subject_kind = "email" if "@" in company else "domain"
     ledger = Ledger(engine)
     gate = PolicyGate(engine, ledger)
-    templates = tuple(pir or ("attack-surface",))
+    default_template = "email-public-presence" if subject_kind == "email" else "attack-surface"
+    templates = tuple(pir or (default_template,))
 
     console.print(f"[bold]{company}[/bold]  engagement {view.id[:12]}  "
                   f"PIRs: {', '.join(templates)}")
@@ -264,7 +303,7 @@ def harness_run(
             gate=gate,
             company=company,
             engagement=view,
-            analyst=analyst or os.environ.get("USER", "analyst"),
+            analyst=who,
             pir_templates=templates,
             caps=RunCaps(
                 max_steps=max_steps,
@@ -272,6 +311,7 @@ def harness_run(
                 max_wall_secs=max_seconds,
             ),
             approve=set(approve or []),
+            subject_kind=subject_kind,
         )
     except KeyError as exc:
         console.print(f"[red]{exc}[/red]")
@@ -324,6 +364,75 @@ def _view_of(row) -> EngagementView:
     )
 
 
+def _covering_engagement(engine: sa.Engine, target: str) -> Optional[EngagementView]:
+    """The most recent in-force engagement that authorizes this target, if any.
+
+    Returns None rather than exiting, so callers can choose to self-authorize.
+    """
+    with engine.connect() as conn:
+        rows = conn.execute(
+            sa.select(schema.engagement)
+            .where(schema.engagement.c.expires_at > _now())
+            .order_by(schema.engagement.c.created_at.desc())
+        ).all()
+    for row in rows:
+        view = _view_of(row)
+        if view.covers(target):
+            return view
+    return None
+
+
+def _self_authorize(
+    engine: sa.Engine, target: str, who: str, days: int
+) -> tuple[EngagementView, str]:
+    """Record a scoped operator engagement for a target with no prior one.
+
+    The authority is prospect_company (domain) or public_research (email) —
+    never client_engagement — so this grants only the passive research an
+    operator is entitled to run on their own say-so. Tier C and active
+    techniques remain gated. The engagement is persisted and attributed, so
+    the self-authorization is itself on the record.
+    """
+    from neesha.resolve.intake import resolve_seed
+
+    seed = resolve_seed(target, "auto")
+    if seed["kind"] == "email":
+        authority, domains, emails, subject = "public_research", (), (seed["normalized"],), seed["normalized"]
+    elif seed["kind"] in ("domain", "website") and seed.get("domain"):
+        authority, domains, emails, subject = "prospect_company", (seed["domain"],), (), seed["domain"]
+    else:
+        raise ValueError(f"{target!r} is not a domain or exact email; create an engagement explicitly.")
+
+    now = _now()
+    engagement_id = uuid4().hex
+    with engine.begin() as conn:
+        conn.execute(
+            schema.engagement.insert().values(
+                id=engagement_id,
+                authority_basis=authority,
+                authorized_domains=list(domains),
+                authorized_emails=list(emails),
+                permitted_techniques=[],
+                authorized_by=f"operator-self-authorized:{who}",
+                starts_at=now,
+                expires_at=now + timedelta(days=days),
+                created_at=now,
+            )
+        )
+    return (
+        EngagementView(
+            id=engagement_id,
+            authority_basis=authority,
+            permitted_techniques=frozenset(),
+            authorized_domains=domains,
+            authorized_emails=emails,
+            starts_at=now,
+            expires_at=now + timedelta(days=days),
+        ),
+        subject,
+    )
+
+
 def _resolve_engagement(
     engine: sa.Engine, engagement_id: Optional[str], target: Optional[str] = None
 ) -> EngagementView:
@@ -342,30 +451,14 @@ def _resolve_engagement(
             )
             raise typer.Exit(1)
 
-        # No id given: among in-force engagements, newest first, pick the one
-        # that actually authorizes this target rather than blindly taking the
-        # newest and then refusing the run.
-        rows = conn.execute(
-            sa.select(schema.engagement)
-            .where(schema.engagement.c.expires_at > _now())
-            .order_by(schema.engagement.c.created_at.desc())
-        ).all()
-
-    if not rows:
-        console.print(
-            "[red]no engagement in force[/red] — collection is not authorized.\n"
-            "  neesha harness engagement create --domain acme.com --by you@example"
-        )
-        raise typer.Exit(1)
-
-    views = [_view_of(row) for row in rows]
-    if target:
-        for view in views:
-            if view.covers(target):
-                return view
-    # None covers the target; return the newest so the caller reports the
-    # authorization gap with a concrete engagement id.
-    return views[0]
+    covering = _covering_engagement(engine, target) if target else None
+    if covering is not None:
+        return covering
+    console.print(
+        "[red]no engagement in force[/red] — collection is not authorized.\n"
+        "  neesha harness engagement create --domain acme.com --by you@example"
+    )
+    raise typer.Exit(1)
 
 
 def _print_report(report) -> None:

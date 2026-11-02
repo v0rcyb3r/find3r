@@ -83,7 +83,18 @@ month's budget before collecting:
 .venv/bin/neesha harness budget show
 ```
 
-Additional options: `--engagement <id>`, `--analyst`, `--max-steps`,
+By default, if no engagement covers the target, `harness run` records a scoped
+operator engagement for it automatically (**self-authorization**) and proceeds,
+so routine research needs no setup. Self-authorization grants only passive
+authority — `prospect_company` for a domain, `public_research` for an exact
+email — never `client_engagement`, so the authority-gated person-enumeration
+tiers and active techniques stay gated exactly as before. Each self-authorized
+engagement is persisted and attributed (`operator-self-authorized:<analyst>`),
+so it is on the record like any other. Pass `--no-self-authorize` to require a
+pre-existing engagement instead, or `--engagement <id>` to pin one.
+
+Additional options: `--engagement <id>`, `--analyst`, `--approve <adapter>`,
+`--self-authorize/--no-self-authorize`, `--days`, `--max-steps`,
 `--max-seconds`, and repeatable `--pir`. The `email-security-fit` template exists,
 and the CLI preserves its original narrow default collector set;
 the workspace now uses the separate `email-posture` template to collect those records.
