@@ -29,8 +29,25 @@ the remediation order (§7).
    ledger. No code path may reach a metered API without a reservation.
 6. **The accuracy guardrail is a gate.** Admiralty grading, corroboration,
    and confidence ceilings run before any briefing leaves.
-7. **Company-first.** People appear as business roles attached to an
-   organization, with business contact fields only.
+7. **Company context where evidenced.** People in company investigations appear
+   as business roles with business contact fields. Explicit user direction also
+   permits an exact email, including personal/public-mailbox addresses, to be an
+   independent public-research subject. Never manufacture an organization or
+   named person from the email/provider domain. Name matches remain observations.
+
+## Independent email research (explicit user scope update)
+
+The user's later instruction overrides the earlier company-only product framing.
+Email-root runs use `entity.kind=email` with no company FK, authority
+`public_research`, and persisted `authorized_emails` containing only the exact
+address. They never authorize the mailbox-provider domain, other addresses, or
+active techniques. Only email-accepting public-source adapters are planned.
+Public `public.*` observations with personal sensitivity may be exported only
+for that exact email root; restricted material remains excluded. Profile-hash,
+commit-author and provider-linked-login observations do not establish identity,
+registration, account ownership or employment. No company scoring or buying-role
+map is generated for independent email subjects. Other identifier types still
+require actual resolution; ambiguity is never silently replaced with a guess.
 
 ## The intelligence cycle
 

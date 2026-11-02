@@ -13,3 +13,5 @@ reports/
 .DS_Store
 .pytest_cache/
 .coverage
+
+.tools/
