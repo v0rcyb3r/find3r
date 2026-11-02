@@ -126,37 +126,45 @@ class DnsPostureAdapter(BaseAdapter):
             facts.append(FactDraft(attribute='email.spf.qualifier', value='absent'))
         return facts
 
+    # For a _dmarc lookup specifically, NXDOMAIN is the ordinary way a name
+    # publishes no DMARC record, so it is a confident no-record answer here
+    # (the apex's existence is established separately by _domain_exists).
+    _DMARC_NO_RECORD = frozenset({'ok', 'noerror-nodata', 'nxdomain'})
+
     def _dmarc_facts(self, by_key, domain, domain_exists):
         """DMARC with organizational-domain inheritance.
 
-        A subdomain with no record of its own inherits its parent's policy, so
-        the effective policy is read from the most specific ancestor that
-        publishes one. 'absent' is claimed only when the domain exists and no
-        ancestor publishes a DMARC record, with every ancestor lookup a
-        confident no-record answer (a timeout anywhere leaves it unknown).
+        Walk _dmarc from the queried name up its ancestors. The most specific
+        published policy governs; when it comes from an ancestor above the
+        queried domain, the subdomain policy (sp=) applies if set, else p=.
+        'absent' is claimed only when the domain exists and every level up the
+        chain is a confident no-record answer. A lookup that errors at a more
+        specific level than any published policy leaves the result unknown:
+        we cannot tell whether that level publishes its own record, so a
+        parent's policy must not be inherited past an unknown.
         """
+        if not domain_exists:
+            return []
         ancestors = _dmarc_ancestors(domain)
-        all_no_record = domain_exists
-        for name in ancestors:
+        for depth, name in enumerate(ancestors):
             row = by_key.get((name, 'TXT'))
-            records = [v for v in (row.get('records') or []) if isinstance(v, str)] if isinstance(row, dict) else []
+            if not isinstance(row, dict) or row.get('status') not in self._DMARC_NO_RECORD:
+                return []  # error/timeout at this level: unknown, do not inherit
+            records = [v for v in (row.get('records') or []) if isinstance(v, str)]
             candidates = list(dict.fromkeys(
                 v for v in records if re.match(r'^v=DMARC1(?:\s*;|$)', v, re.I)))
             if len(candidates) == 1:
-                # The most specific published policy wins; stop walking up.
-                facts = [FactDraft(attribute='email.dmarc.record', value=candidates[0])]
                 dmarc = parse_dmarc(candidates)
-                if dmarc.policy in ('none', 'quarantine', 'reject'):
-                    facts.append(FactDraft(attribute='email.dmarc.policy', value=dmarc.policy))
+                # Above the queried domain, sp= governs subdomains (fallback p=).
+                policy = (dmarc.subdomain_policy or dmarc.policy) if depth else dmarc.policy
+                facts = [FactDraft(attribute='email.dmarc.record', value=candidates[0])]
+                if policy in ('none', 'quarantine', 'reject'):
+                    facts.append(FactDraft(attribute='email.dmarc.policy', value=policy))
                 return facts
             if candidates:
                 # Conflicting records at this level: present but ambiguous.
                 return [FactDraft(attribute='email.dmarc.record', value=v) for v in candidates]
-            if (not isinstance(row, dict) or row.get('status') not in self._NO_RECORD
-                    or _attempts(records, 'dmarc')):
-                # A timeout or a malformed attempt at any level is not a
-                # confident absence for the inherited policy.
-                all_no_record = False
-        if all_no_record and ancestors:
-            return [FactDraft(attribute='email.dmarc.policy', value='absent')]
-        return []
+            if _attempts(records, 'dmarc'):
+                return []  # present but malformed at this level: unknown, not absent
+            # No record at this level; inherit from the parent.
+        return [FactDraft(attribute='email.dmarc.policy', value='absent')] if ancestors else []

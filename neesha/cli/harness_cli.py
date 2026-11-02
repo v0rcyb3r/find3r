@@ -321,8 +321,11 @@ def harness_run(
     from neesha.harness.brief import write_brief
     from neesha.config import harden_path
 
-    paths = write_brief(engine, report.run_id, out)
+    # Harden the output directory before the briefing is written, so the
+    # files are never briefly world-readable between write and chmod.
+    out.mkdir(parents=True, exist_ok=True)
     harden_path(out)
+    paths = write_brief(engine, report.run_id, out)
     for path in paths:
         harden_path(path)
         console.print(f"briefing: {path}")
@@ -332,10 +335,16 @@ def harness_run(
 def harness_purge() -> None:
     """Delete facts, source records and cache entries past their retention.
 
-    This is a compliance control, not housekeeping: under some providers'
-    terms we are an independent controller for retrieved personal data. Safe
-    to run unattended from cron — it only removes rows already past their
-    recorded retention date.
+    A retention control for the data that carries personal content: under
+    some providers' terms we are an independent controller for retrieved
+    personal data, and this removes the rows holding it once expired. Safe to
+    run unattended from cron.
+
+    Scope and limits: it removes expired fact, source-record and cache rows
+    only. It does not delete now-orphaned entity rows (names/emails with no
+    remaining facts), already-written report files, or anything inside a run's
+    other stores — use `delete investigation` for a whole run, and rotate
+    report files separately.
     """
     from neesha.harness.repository import Repository
 
@@ -345,6 +354,10 @@ def harness_purge() -> None:
     console.print(
         f"purged facts={counts['fact']} "
         f"source_records={counts['source_record']} cache={counts['cache']}"
+    )
+    console.print(
+        "[dim]entities, report files and other run stores are not purged by "
+        "this command.[/dim]"
     )
 
 

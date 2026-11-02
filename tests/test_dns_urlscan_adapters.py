@@ -201,3 +201,55 @@ def test_urlscan_response_limit_and_provider_failure_are_explicit(monkeypatch):
     monkeypatch.setattr('neesha.adapters.urlscan.urlopen',fail)
     with pytest.raises(AdapterError,match='unavailable'):
         adapter.fetch(reference)
+
+
+def test_dns_dmarc_nxdomain_on_existing_domain_is_absent(monkeypatch):
+    """NXDOMAIN on _dmarc is the ordinary way a record is absent, so for a
+    domain that otherwise resolves it is a confident absence."""
+    def query(self,name,rtype):
+        if name=='acme.com' and rtype=='NS':
+            return QueryResult(name,rtype,'system','ok',[Record('NS','ns1.acme.com')])
+        if name.startswith('_dmarc.'):
+            return QueryResult(name,rtype,'system','nxdomain')
+        return QueryResult(name,rtype,'system','noerror-nodata')
+    monkeypatch.setattr('neesha.adapters.dns_posture.SystemResolver.query',query)
+    adapter=DnsPostureAdapter()
+    request=Request('domain','acme.com')
+    facts={(f.attribute,f.value) for f in adapter.parse(adapter.fetch(adapter.search(request)[0]),request)}
+    assert ('email.dmarc.policy','absent') in facts
+
+
+def test_dns_dmarc_error_at_specific_level_does_not_inherit_parent(monkeypatch):
+    """If the queried name's _dmarc lookup errors, the parent's policy is not
+    inherited — the effective policy is unknown, never falsely absent either."""
+    def query(self,name,rtype):
+        if name=='mail.acme.com' and rtype=='A':
+            return QueryResult(name,rtype,'system','ok',[Record('A','203.0.113.9')])
+        if name=='_dmarc.mail.acme.com':
+            return QueryResult(name,rtype,'system','error',error='timeout')
+        if name=='_dmarc.acme.com':
+            return QueryResult(name,rtype,'system','ok',[Record('TXT','v=DMARC1; p=reject')])
+        return QueryResult(name,rtype,'system','noerror-nodata')
+    monkeypatch.setattr('neesha.adapters.dns_posture.SystemResolver.query',query)
+    adapter=DnsPostureAdapter()
+    request=Request('domain','mail.acme.com')
+    facts={(f.attribute,f.value) for f in adapter.parse(adapter.fetch(adapter.search(request)[0]),request)}
+    assert not any(a=='email.dmarc.policy' for a,_ in facts)
+
+
+def test_dns_subdomain_policy_sp_governs_inherited_dmarc(monkeypatch):
+    """When inheriting from the organizational domain, sp= governs subdomains."""
+    def query(self,name,rtype):
+        if name=='mail.acme.com' and rtype=='A':
+            return QueryResult(name,rtype,'system','ok',[Record('A','203.0.113.9')])
+        if name=='_dmarc.mail.acme.com':
+            return QueryResult(name,rtype,'system','noerror-nodata')
+        if name=='_dmarc.acme.com':
+            return QueryResult(name,rtype,'system','ok',[Record('TXT','v=DMARC1; p=reject; sp=none')])
+        return QueryResult(name,rtype,'system','noerror-nodata')
+    monkeypatch.setattr('neesha.adapters.dns_posture.SystemResolver.query',query)
+    adapter=DnsPostureAdapter()
+    request=Request('domain','mail.acme.com')
+    facts={(f.attribute,f.value) for f in adapter.parse(adapter.fetch(adapter.search(request)[0]),request)}
+    assert ('email.dmarc.policy','none') in facts
+    assert ('email.dmarc.policy','reject') not in facts
