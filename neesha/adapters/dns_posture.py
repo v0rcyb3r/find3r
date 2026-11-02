@@ -36,6 +36,11 @@ class DnsPostureAdapter(BaseAdapter):
         return RawResult(payload=json.dumps(results).encode(), request_url=reference.url,
                          origin_url=reference.url, content_type='application/json')
 
+    # Statuses that are a confident answer from the resolver, as opposed to a
+    # transport failure. An authoritative "this name has no such record" is
+    # evidence the record is not published; a timeout is not.
+    _ANSWERED = frozenset({'ok', 'nxdomain', 'noerror-nodata'})
+
     def parse(self, raw, request):
         try:
             results = json.loads(raw.payload)
@@ -44,30 +49,58 @@ class DnsPostureAdapter(BaseAdapter):
         if not isinstance(results, list):
             raise AdapterError('Unexpected DNS response shape.')
         domain = request.value.rstrip('.').lower()
-        facts = []
+        by_key: dict[tuple, dict] = {}
         for row in results:
-            if not isinstance(row,dict) or row.get('status') != 'ok':
-                continue  # A lookup failure is never evidence of a missing control.
-            name, rtype, records = row.get('name'), row.get('type'), row.get('records', [])
-            if not isinstance(records,list):
+            if isinstance(row, dict):
+                by_key[(row.get('name'), row.get('type'))] = row
+        facts = []
+        # Positive infrastructure observations only: a lookup failure here is
+        # never recorded as evidence of a missing host.
+        for rtype in ('A', 'AAAA', 'MX', 'NS', 'CAA'):
+            row = by_key.get((domain, rtype))
+            if not row or row.get('status') != 'ok':
                 continue
-            records = [v for v in records if isinstance(v,str)]
-            if name == domain and rtype in ('A','AAAA','MX','NS','CAA'):
-                facts += [FactDraft(attribute='dns.'+rtype.lower(),value=v) for v in records[:100]]
-            if rtype == 'TXT' and name == domain:
-                candidates = list(dict.fromkeys(v for v in records if re.match(r'^v=spf1(?:\s|$)', v)))
-                facts += [FactDraft(attribute='email.spf.record', value=v) for v in candidates]
-                # Multiple SPF records are invalid; do not imply enforcement.
-                if len(candidates) == 1:
-                    spf = parse_spf(candidates)
-                    if spf.qualifier != 'unknown':
-                        facts.append(FactDraft(attribute='email.spf.qualifier',value=spf.qualifier))
-            if rtype == 'TXT' and name == '_dmarc.'+domain:
-                candidates = list(dict.fromkeys(v for v in records if re.match(r'^v=DMARC1(?:\s*;|$)', v, re.I)))
-                facts += [FactDraft(attribute='email.dmarc.record', value=v) for v in candidates]
-                # Conflicting/duplicate policies are not evidence of enforcement.
-                if len(candidates) == 1:
-                    dmarc = parse_dmarc(candidates)
-                    if dmarc.policy in ('none','quarantine','reject'):
-                        facts.append(FactDraft(attribute='email.dmarc.policy',value=dmarc.policy))
+            records = [v for v in (row.get('records') or []) if isinstance(v, str)]
+            facts += [FactDraft(attribute='dns.' + rtype.lower(), value=v) for v in records[:100]]
+        facts += self._spf_facts(by_key.get((domain, 'TXT')))
+        facts += self._dmarc_facts(by_key.get(('_dmarc.' + domain, 'TXT')))
         return facts
+
+    def _spf_facts(self, row):
+        if not isinstance(row, dict):
+            return []
+        records = [v for v in (row.get('records') or []) if isinstance(v, str)]
+        candidates = list(dict.fromkeys(v for v in records if re.match(r'^v=spf1(?:\s|$)', v)))
+        facts = [FactDraft(attribute='email.spf.record', value=v) for v in candidates]
+        if len(candidates) == 1:
+            # Multiple SPF records are invalid; do not imply enforcement.
+            spf = parse_spf(candidates)
+            if spf.qualifier != 'unknown':
+                facts.append(FactDraft(attribute='email.spf.qualifier', value=spf.qualifier))
+        elif not candidates and row.get('status') in self._ANSWERED and not self._attempts(records, 'spf'):
+            # The resolver answered authoritatively and nothing at the apex even
+            # attempts SPF: the record is absent, an observation rather than a
+            # missing lookup. A malformed attempt stays unknown, not "absent".
+            facts.append(FactDraft(attribute='email.spf.qualifier', value='absent'))
+        return facts
+
+    def _dmarc_facts(self, row):
+        if not isinstance(row, dict):
+            return []
+        records = [v for v in (row.get('records') or []) if isinstance(v, str)]
+        candidates = list(dict.fromkeys(v for v in records if re.match(r'^v=DMARC1(?:\s*;|$)', v, re.I)))
+        facts = [FactDraft(attribute='email.dmarc.record', value=v) for v in candidates]
+        if len(candidates) == 1:
+            # Conflicting/duplicate policies are not evidence of enforcement.
+            dmarc = parse_dmarc(candidates)
+            if dmarc.policy in ('none', 'quarantine', 'reject'):
+                facts.append(FactDraft(attribute='email.dmarc.policy', value=dmarc.policy))
+        elif not candidates and row.get('status') in self._ANSWERED and not self._attempts(records, 'dmarc'):
+            facts.append(FactDraft(attribute='email.dmarc.policy', value='absent'))
+        return facts
+
+    @staticmethod
+    def _attempts(records, mechanism: str) -> bool:
+        """True if some record looks like a (possibly malformed) attempt at the
+        mechanism, so we withhold an 'absent' claim and leave it unknown."""
+        return any(re.match(r'^v=' + mechanism, v, re.I) for v in records)

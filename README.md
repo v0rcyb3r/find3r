@@ -98,6 +98,10 @@ the workspace now uses the separate `email-posture` template to collect those re
 - Facts carry source records and table-driven grades. Corroboration requires
   the same entity, attribute, and value from a different origin, with live
   retention and an observed supporting fact.
+- An authoritative DNS negative answer (NXDOMAIN / NODATA) for an SPF or DMARC
+  record is recorded as an observed `absent` fact and scored as a need signal.
+  A lookup that times out stays unknown, and a malformed record is unknown, not
+  absent — a failed collection is never turned into a claim of absence.
 - People appear as business roles attached to a company. Tier C adapters need
   a client engagement and analyst approval; Tier D is disabled. The IntelX
   aggregate connector is implemented behind Tier C and is not enabled in

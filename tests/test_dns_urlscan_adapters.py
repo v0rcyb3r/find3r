@@ -26,15 +26,24 @@ def test_dns_fetch_queries_expected_records_and_preserves_success(monkeypatch):
     request=Request('domain','acme.com')
     facts=adapter.parse(adapter.fetch(adapter.search(request)[0]),request)
     assert calls==[('acme.com',t) for t in ('A','AAAA','MX','NS','CAA','TXT')]+[('_dmarc.acme.com','TXT')]
-    assert [(f.attribute,f.value) for f in facts]==[('dns.a','203.0.113.10')]
+    # The A success is preserved; an authoritative noerror-nodata for the apex
+    # TXT and _dmarc records is an observed absence of SPF/DMARC.
+    assert {(f.attribute,f.value) for f in facts}=={
+        ('dns.a','203.0.113.10'),
+        ('email.spf.qualifier','absent'),('email.dmarc.policy','absent')}
 
 
 @pytest.mark.parametrize('status',['nxdomain','noerror-nodata'])
-def test_dns_negative_answers_are_not_security_absence_claims(monkeypatch,status):
+def test_dns_authoritative_negative_answers_are_observed_absence(monkeypatch,status):
+    """An authoritative 'no such record' is evidence the control is not
+    published — distinct from a timeout, which stays unknown (see
+    test_dns_all_timeouts_are_a_collection_failure)."""
     monkeypatch.setattr('neesha.adapters.dns_posture.SystemResolver.query',lambda self,n,t:QueryResult(n,t,'system',status))
     adapter=DnsPostureAdapter()
     request=Request('domain','acme.com')
-    assert adapter.parse(adapter.fetch(adapter.search(request)[0]),request)==[]
+    facts=adapter.parse(adapter.fetch(adapter.search(request)[0]),request)
+    assert {(f.attribute,f.value) for f in facts}=={
+        ('email.spf.qualifier','absent'),('email.dmarc.policy','absent')}
 
 
 def test_dns_all_timeouts_are_a_collection_failure(monkeypatch):

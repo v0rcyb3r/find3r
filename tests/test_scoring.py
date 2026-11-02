@@ -162,3 +162,46 @@ def test_scoring_is_deterministic_does_not_mutate_and_deduplicates_fact_ids():
     assert first==score_brief(list(reversed(rows)),configured)
     assert (rows,configured)==original
     assert first['security_needs']['criteria'][0]['evidence_ids']==['f1']
+
+
+# ---- step 3: confirmed absence is a graded need signal ------------------
+
+
+@pytest.mark.parametrize('attribute', ['email.dmarc.policy', 'email.spf.qualifier'])
+def test_confirmed_absence_of_email_auth_is_the_strongest_need(attribute):
+    """An observed 'absent' record is the top need signal, not an unknown. A
+    domain that publishes nothing must not look better-covered than one that
+    publishes a weak policy."""
+    security = score_brief([fact(attribute, 'absent')])['security_needs']
+    criterion = next(c for c in security['criteria'] if c['status'] == 'assessed')
+    assert security['score'] == 100
+    assert criterion['points'] == 100
+    assert criterion['evidence_ids'] == ['f1']
+    assert 'No ' in criterion['explanation']
+
+
+def test_absent_dmarc_outscores_enforced_dmarc():
+    absent = score_brief([fact('email.dmarc.policy', 'absent')])['security_needs']['score']
+    enforced = score_brief([fact('email.dmarc.policy', 'reject')])['security_needs']['score']
+    assert absent > enforced
+
+
+def test_missing_header_is_a_need_only_once_the_page_was_assessed():
+    # No scan marker: a header we never looked for stays unknown, not a need.
+    unknown = score_brief([fact('email.dmarc.policy', 'reject')])['security_needs']
+    hsts = next(c for c in unknown['criteria']
+                if c['attribute'] == 'http.security_header.strict-transport-security')
+    assert hsts['points'] is None
+
+    # The website was fetched: an absent header is now an observed need, while
+    # a present one remains a non-verdict at zero need.
+    assessed = score_brief([
+        fact('http.security_assessed', 'true', 'scan'),
+        fact('http.security_header.content-security-policy', "default-src 'self'", 'csp'),
+    ])['security_needs']
+    by_attr = {c['attribute']: c for c in assessed['criteria']}
+    assert by_attr['http.security_header.content-security-policy']['points'] == 0
+    assert by_attr['http.security_header.strict-transport-security']['points'] == 100
+    # All six header criteria are now assessed rather than unknown.
+    assert sum(c['points'] is not None for c in assessed['criteria']
+               if c['attribute'].startswith('http.security_header.')) == 6

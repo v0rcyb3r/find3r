@@ -69,13 +69,15 @@ def _security(rows):
     criteria = []
     for identifier, label, attribute, weight, mapping, explanations in (
         ('dmarc_policy', 'Published DMARC policy', 'email.dmarc.policy', 3.0,
-         {'none': 100, 'quarantine': 50, 'reject': 0},
-         {'none': 'The observed policy requests monitoring, not quarantine or rejection.',
+         {'absent': 100, 'none': 100, 'quarantine': 50, 'reject': 0},
+         {'absent': 'No DMARC record is published, so DMARC evaluates no mail for this domain.',
+          'none': 'The observed policy requests monitoring, not quarantine or rejection.',
           'quarantine': 'The observed policy requests quarantine rather than rejection.',
           'reject': 'The observed policy requests rejection; no need signal is assigned on this criterion.'}),
         ('spf_qualifier', 'Published SPF all qualifier', 'email.spf.qualifier', 2.0,
-         {'+all': 100, '~all': 50, '-all': 0},
-         {'+all': 'The observed +all mechanism permits all senders.',
+         {'absent': 100, '+all': 100, '~all': 50, '-all': 0},
+         {'absent': 'No SPF record is published, so SPF constrains no senders for this domain.',
+          '+all': 'The observed +all mechanism permits all senders.',
           '~all': 'The observed ~all mechanism is a soft-fail signal rather than a hard fail.',
           '-all': 'The observed -all mechanism requests a hard fail; no need signal is assigned on this criterion.'}),
     ):
@@ -90,14 +92,24 @@ def _security(rows):
             reason = ('No observed record is available; this is unknown, not a missing control.' if not values
                       else 'Conflicting or unsupported observed values require analyst review; no score is assigned.')
         criteria.append(_criterion(identifier, label, attribute, weight, matching, points, reason))
+    # A website scan that completed emits this marker, which is what lets a
+    # header's absence be read as observed rather than merely uncollected.
+    page_assessed = any(r['attribute'] == 'http.security_assessed' for r in rows)
     for header in _HEADERS:
         attribute = 'http.security_header.' + header
         matching = [r for r in rows if r['attribute'] == attribute]
+        if matching:
+            points = 0
+            reason = 'This header was observed. Presence alone does not establish correct configuration or effective protection.'
+        elif page_assessed:
+            points = 100
+            reason = 'The website was fetched and this security header was not present in the response; its absence is an observed need signal, not a configuration verdict.'
+        else:
+            points = None
+            reason = 'No observation is available. An uncollected header is not assumed absent or vulnerable.'
         criteria.append(_criterion(
             'header_' + header.replace('-', '_'), 'Observed ' + header, attribute, 1.0,
-            matching, 0 if matching else None,
-            ('This header was observed. Presence alone does not establish correct configuration or effective protection.'
-             if matching else 'No observation is available. An uncollected header is not assumed absent or vulnerable.'),
+            matching, points, reason,
         ))
     result = _summarize(criteria,
         'Higher values indicate stronger observed signals of potential security needs on assessed criteria only. '

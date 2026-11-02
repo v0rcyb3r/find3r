@@ -213,7 +213,8 @@ class CompanyWebAdapter(BaseAdapter):
     produces: ClassVar[frozenset[str]] = frozenset({
         'company.business_email', 'company.business_phone', 'company.contact_page',
         'person.business_email', 'person.business_phone', 'person.role', 'person.profile_url',
-        'http.status', 'http.final_url', 'http.security_header', 'tls.connection.validated',
+        'http.status', 'http.final_url', 'http.security_header', 'http.security_assessed',
+        'tls.connection.validated',
     })
     accepts: ClassVar[frozenset[str]] = frozenset({'company', 'domain'})
     retention_days: ClassVar[int] = 30
@@ -285,6 +286,10 @@ class CompanyWebAdapter(BaseAdapter):
             if isinstance(homepage.get('status'), int):
                 add('http.status', str(homepage['status']))
                 add('http.final_url', homepage.get('url', ''))
+                # The homepage was fetched, so its security headers were
+                # observed in full: a header now absent is absent, not merely
+                # uncollected. This marker is what lets scoring read it so.
+                add('http.security_assessed', 'true')
             if homepage.get('tls_validated') is True:
                 add('tls.connection.validated', 'true')
             headers = homepage.get('security_headers', {})
