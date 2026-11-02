@@ -283,21 +283,26 @@ class CompanyWebAdapter(BaseAdapter):
         # assumed missing control. Retain the response URL for analyst review.
         homepage = bundle['pages'][0] if bundle['pages'] else {}
         if isinstance(homepage, dict):
-            if isinstance(homepage.get('status'), int):
+            fetched = isinstance(homepage.get('status'), int)
+            if fetched:
                 add('http.status', str(homepage['status']))
                 add('http.final_url', homepage.get('url', ''))
-                # The homepage was fetched, so its security headers were
-                # observed in full: a header now absent is absent, not merely
-                # uncollected. This marker is what lets scoring read it so.
-                add('http.security_assessed', 'true')
             if homepage.get('tls_validated') is True:
                 add('tls.connection.validated', 'true')
             headers = homepage.get('security_headers', {})
             if isinstance(headers, dict):
                 for name in SECURITY_HEADERS:
                     value = headers.get(name)
-                    if isinstance(value, str) and len(value) <= 8192:
-                        add('http.security_header.' + name, value)
+                    if isinstance(value, str) and value.strip():
+                        # Record presence even when oversize — a present header
+                        # must never be dropped and later read as absent. The
+                        # stored value is bounded for review, not a verdict.
+                        add('http.security_header.' + name, value[:8192])
+                # Mark the scan complete only when the header set was actually
+                # observed on a successful fetch; absence can then be read as
+                # observed rather than merely uncollected.
+                if fetched:
+                    add('http.security_assessed', 'true')
         for page in bundle['pages'][:MAX_PAGES]:
             if not isinstance(page, dict) or not isinstance(page.get('html'), str):
                 continue

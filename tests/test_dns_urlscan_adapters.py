@@ -33,17 +33,63 @@ def test_dns_fetch_queries_expected_records_and_preserves_success(monkeypatch):
         ('email.spf.qualifier','absent'),('email.dmarc.policy','absent')}
 
 
-@pytest.mark.parametrize('status',['nxdomain','noerror-nodata'])
-def test_dns_authoritative_negative_answers_are_observed_absence(monkeypatch,status):
-    """An authoritative 'no such record' is evidence the control is not
-    published — distinct from a timeout, which stays unknown (see
-    test_dns_all_timeouts_are_a_collection_failure)."""
-    monkeypatch.setattr('neesha.adapters.dns_posture.SystemResolver.query',lambda self,n,t:QueryResult(n,t,'system',status))
+def test_dns_nodata_on_an_existing_domain_is_observed_absence(monkeypatch):
+    """The domain exists (NODATA, not NXDOMAIN) and publishes no SPF/DMARC:
+    that is an observed absence, distinct from a timeout, which stays
+    unknown (see test_dns_all_timeouts_are_a_collection_failure)."""
+    def query(self,name,rtype):
+        if name=='acme.com' and rtype=='NS':
+            return QueryResult(name,rtype,'system','ok',[Record('NS','ns1.acme.com')])
+        return QueryResult(name,rtype,'system','noerror-nodata')
+    monkeypatch.setattr('neesha.adapters.dns_posture.SystemResolver.query',query)
     adapter=DnsPostureAdapter()
     request=Request('domain','acme.com')
     facts=adapter.parse(adapter.fetch(adapter.search(request)[0]),request)
-    assert {(f.attribute,f.value) for f in facts}=={
+    assert {(f.attribute,f.value) for f in facts}>={
         ('email.spf.qualifier','absent'),('email.dmarc.policy','absent')}
+
+
+def test_dns_nxdomain_everywhere_is_unknown_not_absence(monkeypatch):
+    """When the domain itself does not resolve, absence of a control is never
+    claimed — there is no domain to protect."""
+    monkeypatch.setattr('neesha.adapters.dns_posture.SystemResolver.query',lambda self,n,t:QueryResult(n,t,'system','nxdomain'))
+    adapter=DnsPostureAdapter()
+    request=Request('domain','acme.com')
+    assert adapter.parse(adapter.fetch(adapter.search(request)[0]),request)==[]
+
+
+def test_dns_subdomain_inherits_parent_dmarc_policy(monkeypatch):
+    """A subdomain with no _dmarc record inherits the organizational domain's
+    policy, so DMARC is not 'absent' there; SPF has no such fallback."""
+    def query(self,name,rtype):
+        if name=='mail.acme.com' and rtype=='A':
+            return QueryResult(name,rtype,'system','ok',[Record('A','203.0.113.9')])
+        if name=='_dmarc.acme.com' and rtype=='TXT':
+            return QueryResult(name,rtype,'system','ok',[Record('TXT','v=DMARC1; p=reject')])
+        return QueryResult(name,rtype,'system','noerror-nodata')
+    monkeypatch.setattr('neesha.adapters.dns_posture.SystemResolver.query',query)
+    adapter=DnsPostureAdapter()
+    request=Request('domain','mail.acme.com')
+    facts={(f.attribute,f.value) for f in adapter.parse(adapter.fetch(adapter.search(request)[0]),request)}
+    assert ('email.dmarc.policy','reject') in facts
+    assert ('email.dmarc.policy','absent') not in facts
+    assert ('email.spf.qualifier','absent') in facts
+
+
+def test_dns_malformed_record_is_unknown_not_absent(monkeypatch):
+    """A present but malformed SPF/DMARC record withholds an 'absent' claim."""
+    def query(self,name,rtype):
+        if name=='acme.com' and rtype=='TXT':
+            return QueryResult(name,rtype,'system','ok',[Record('TXT','v = spf1 broken')])
+        if name=='_dmarc.acme.com' and rtype=='TXT':
+            return QueryResult(name,rtype,'system','ok',[Record('TXT','"v=DMARC10; p=reject"')])
+        return QueryResult(name,rtype,'system','noerror-nodata')
+    monkeypatch.setattr('neesha.adapters.dns_posture.SystemResolver.query',query)
+    adapter=DnsPostureAdapter()
+    request=Request('domain','acme.com')
+    facts={(f.attribute,f.value) for f in adapter.parse(adapter.fetch(adapter.search(request)[0]),request)}
+    assert ('email.spf.qualifier','absent') not in facts
+    assert ('email.dmarc.policy','absent') not in facts
 
 
 def test_dns_all_timeouts_are_a_collection_failure(monkeypatch):

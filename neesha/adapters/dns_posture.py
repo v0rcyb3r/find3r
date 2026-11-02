@@ -8,6 +8,31 @@ from neesha.posture.parsers import parse_dmarc, parse_spf
 from neesha.resolvers.dns import SystemResolver
 
 
+def _dmarc_ancestors(domain: str) -> list[str]:
+    """`_dmarc.<name>` for the domain and each parent down to a two-label base.
+
+    A subdomain inherits the organizational domain's DMARC policy, so absence
+    can only be asserted after checking the parents too. The single-label TLD
+    is never queried. Ordered most specific first.
+    """
+    labels = domain.split('.')
+    return ['_dmarc.' + '.'.join(labels[i:]) for i in range(len(labels) - 1)]
+
+
+def _attempts(records, mechanism: str) -> bool:
+    """True if a record looks like a (possibly malformed) attempt at SPF/DMARC.
+
+    Tolerant on purpose — quotes and whitespace are stripped and the version
+    token is matched anywhere — so a broken record withholds an 'absent' claim
+    and leaves the result unknown rather than falsely reporting no record.
+    """
+    for value in records:
+        text = value.strip().strip('"').strip()
+        if re.search(r'v\s*=\s*' + mechanism, text, re.I) or re.search(mechanism + r'1', text, re.I):
+            return True
+    return False
+
+
 class DnsPostureAdapter(BaseAdapter):
     name = 'dns-posture'
     description = 'DNS infrastructure and published SPF/DMARC records'
@@ -27,7 +52,12 @@ class DnsPostureAdapter(BaseAdapter):
         domain = reference.url.removeprefix('dns://')
         resolver = SystemResolver()
         results = []
-        for name, rtype in [(domain,t) for t in ('A','AAAA','MX','NS','CAA','TXT')] + [('_dmarc.'+domain,'TXT')]:
+        # DMARC is published on the organizational domain and inherited by
+        # subdomains, so query _dmarc up the ancestor chain (stopping before
+        # the single-label TLD). SPF is per-exact-domain and is not walked.
+        queries = [(domain, t) for t in ('A', 'AAAA', 'MX', 'NS', 'CAA', 'TXT')]
+        queries += [(name, 'TXT') for name in _dmarc_ancestors(domain)]
+        for name, rtype in queries:
             result = resolver.query(name, rtype)
             results.append({'name':name,'type':rtype,'status':result.status,
                             'records':[r.value for r in result.records]})
@@ -36,10 +66,10 @@ class DnsPostureAdapter(BaseAdapter):
         return RawResult(payload=json.dumps(results).encode(), request_url=reference.url,
                          origin_url=reference.url, content_type='application/json')
 
-    # Statuses that are a confident answer from the resolver, as opposed to a
-    # transport failure. An authoritative "this name has no such record" is
-    # evidence the record is not published; a timeout is not.
-    _ANSWERED = frozenset({'ok', 'nxdomain', 'noerror-nodata'})
+    # A confident answer from the resolver that the name exists but has no such
+    # record, as opposed to a transport failure (unknown) or the name not
+    # existing at all (NXDOMAIN — see _domain_exists).
+    _NO_RECORD = frozenset({'ok', 'noerror-nodata'})
 
     def parse(self, raw, request):
         try:
@@ -62,11 +92,22 @@ class DnsPostureAdapter(BaseAdapter):
                 continue
             records = [v for v in (row.get('records') or []) if isinstance(v, str)]
             facts += [FactDraft(attribute='dns.' + rtype.lower(), value=v) for v in records[:100]]
-        facts += self._spf_facts(by_key.get((domain, 'TXT')))
-        facts += self._dmarc_facts(by_key.get(('_dmarc.' + domain, 'TXT')))
+        # An 'absent' control is only meaningful for a domain that exists. If
+        # the name itself does not resolve, the posture is unknown, not absent.
+        domain_exists = self._domain_exists(by_key, domain)
+        facts += self._spf_facts(by_key.get((domain, 'TXT')), domain_exists)
+        facts += self._dmarc_facts(by_key, domain, domain_exists)
         return facts
 
-    def _spf_facts(self, row):
+    @staticmethod
+    def _domain_exists(by_key, domain) -> bool:
+        for rtype in ('A', 'AAAA', 'NS', 'MX', 'TXT'):
+            row = by_key.get((domain, rtype))
+            if row and row.get('status') in DnsPostureAdapter._NO_RECORD:
+                return True
+        return False
+
+    def _spf_facts(self, row, domain_exists):
         if not isinstance(row, dict):
             return []
         records = [v for v in (row.get('records') or []) if isinstance(v, str)]
@@ -77,30 +118,45 @@ class DnsPostureAdapter(BaseAdapter):
             spf = parse_spf(candidates)
             if spf.qualifier != 'unknown':
                 facts.append(FactDraft(attribute='email.spf.qualifier', value=spf.qualifier))
-        elif not candidates and row.get('status') in self._ANSWERED and not self._attempts(records, 'spf'):
-            # The resolver answered authoritatively and nothing at the apex even
-            # attempts SPF: the record is absent, an observation rather than a
-            # missing lookup. A malformed attempt stays unknown, not "absent".
+        elif (not candidates and domain_exists and row.get('status') in self._NO_RECORD
+              and not _attempts(records, 'spf')):
+            # The domain exists and the resolver confirms no SPF record is
+            # published. SPF has no organizational-domain fallback, so this
+            # absence is an observation. A malformed attempt stays unknown.
             facts.append(FactDraft(attribute='email.spf.qualifier', value='absent'))
         return facts
 
-    def _dmarc_facts(self, row):
-        if not isinstance(row, dict):
-            return []
-        records = [v for v in (row.get('records') or []) if isinstance(v, str)]
-        candidates = list(dict.fromkeys(v for v in records if re.match(r'^v=DMARC1(?:\s*;|$)', v, re.I)))
-        facts = [FactDraft(attribute='email.dmarc.record', value=v) for v in candidates]
-        if len(candidates) == 1:
-            # Conflicting/duplicate policies are not evidence of enforcement.
-            dmarc = parse_dmarc(candidates)
-            if dmarc.policy in ('none', 'quarantine', 'reject'):
-                facts.append(FactDraft(attribute='email.dmarc.policy', value=dmarc.policy))
-        elif not candidates and row.get('status') in self._ANSWERED and not self._attempts(records, 'dmarc'):
-            facts.append(FactDraft(attribute='email.dmarc.policy', value='absent'))
-        return facts
+    def _dmarc_facts(self, by_key, domain, domain_exists):
+        """DMARC with organizational-domain inheritance.
 
-    @staticmethod
-    def _attempts(records, mechanism: str) -> bool:
-        """True if some record looks like a (possibly malformed) attempt at the
-        mechanism, so we withhold an 'absent' claim and leave it unknown."""
-        return any(re.match(r'^v=' + mechanism, v, re.I) for v in records)
+        A subdomain with no record of its own inherits its parent's policy, so
+        the effective policy is read from the most specific ancestor that
+        publishes one. 'absent' is claimed only when the domain exists and no
+        ancestor publishes a DMARC record, with every ancestor lookup a
+        confident no-record answer (a timeout anywhere leaves it unknown).
+        """
+        ancestors = _dmarc_ancestors(domain)
+        all_no_record = domain_exists
+        for name in ancestors:
+            row = by_key.get((name, 'TXT'))
+            records = [v for v in (row.get('records') or []) if isinstance(v, str)] if isinstance(row, dict) else []
+            candidates = list(dict.fromkeys(
+                v for v in records if re.match(r'^v=DMARC1(?:\s*;|$)', v, re.I)))
+            if len(candidates) == 1:
+                # The most specific published policy wins; stop walking up.
+                facts = [FactDraft(attribute='email.dmarc.record', value=candidates[0])]
+                dmarc = parse_dmarc(candidates)
+                if dmarc.policy in ('none', 'quarantine', 'reject'):
+                    facts.append(FactDraft(attribute='email.dmarc.policy', value=dmarc.policy))
+                return facts
+            if candidates:
+                # Conflicting records at this level: present but ambiguous.
+                return [FactDraft(attribute='email.dmarc.record', value=v) for v in candidates]
+            if (not isinstance(row, dict) or row.get('status') not in self._NO_RECORD
+                    or _attempts(records, 'dmarc')):
+                # A timeout or a malformed attempt at any level is not a
+                # confident absence for the inherited policy.
+                all_no_record = False
+        if all_no_record and ancestors:
+            return [FactDraft(attribute='email.dmarc.policy', value='absent')]
+        return []

@@ -98,10 +98,15 @@ the workspace now uses the separate `email-posture` template to collect those re
 - Facts carry source records and table-driven grades. Corroboration requires
   the same entity, attribute, and value from a different origin, with live
   retention and an observed supporting fact.
-- An authoritative DNS negative answer (NXDOMAIN / NODATA) for an SPF or DMARC
-  record is recorded as an observed `absent` fact and scored as a need signal.
-  A lookup that times out stays unknown, and a malformed record is unknown, not
-  absent — a failed collection is never turned into a claim of absence.
+- A confirmed absence of an SPF or DMARC record is recorded as an observed
+  `absent` fact and scored as a need signal. "Confirmed" is deliberately
+  narrow: the domain must resolve (an all-NXDOMAIN name is unknown, not
+  absent), the resolver must return NODATA rather than time out, a malformed
+  record stays unknown, and DMARC is only `absent` when no ancestor up to the
+  organizational domain publishes a policy (a subdomain inherits its parent's).
+  These negatives currently rest on a single system resolver, as the adapter's
+  positive facts do; cross-resolver corroboration of the whole adapter is
+  future work.
 - People appear as business roles attached to a company. Tier C adapters need
   a client engagement and analyst approval; Tier D is disabled. The IntelX
   aggregate connector is implemented behind Tier C and is not enabled in
