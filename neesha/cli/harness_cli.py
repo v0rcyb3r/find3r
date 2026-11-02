@@ -41,9 +41,18 @@ AUTHORITY_BASES = ("own_org", "prospect_company", "client_engagement")
 def get_engine() -> sa.Engine:
     url = os.environ.get("NEESHA_DATABASE_URL") or DEFAULT_DATABASE_URL
     if url.startswith("sqlite"):
-        from pathlib import Path
+        from neesha.config import harden_path
 
-        Path("./data").mkdir(parents=True, exist_ok=True)
+        data = Path("./data")
+        data.mkdir(parents=True, exist_ok=True)
+        # Owner-only: the SQLite file is unencrypted and holds personal data.
+        harden_path(data)
+        db = data / "neesha.sqlite3"
+        engine = sa.create_engine(url)
+        # The file is created lazily on first connect, so harden it then
+        # rather than now, when it may not exist yet.
+        sa.event.listen(engine, "connect", lambda *_: harden_path(db))
+        return engine
     return sa.create_engine(url)
 
 
@@ -270,9 +279,33 @@ def harness_run(
 
     _print_report(report)
     from neesha.harness.brief import write_brief
+    from neesha.config import harden_path
 
-    for path in write_brief(engine, report.run_id, out):
+    paths = write_brief(engine, report.run_id, out)
+    harden_path(out)
+    for path in paths:
+        harden_path(path)
         console.print(f"briefing: {path}")
+
+
+@harness_app.command("purge")
+def harness_purge() -> None:
+    """Delete facts, source records and cache entries past their retention.
+
+    This is a compliance control, not housekeeping: under some providers'
+    terms we are an independent controller for retrieved personal data. Safe
+    to run unattended from cron — it only removes rows already past their
+    recorded retention date.
+    """
+    from neesha.harness.repository import Repository
+
+    engine = get_engine()
+    _require_schema(engine)
+    counts = Repository.purge(engine)
+    console.print(
+        f"purged facts={counts['fact']} "
+        f"source_records={counts['source_record']} cache={counts['cache']}"
+    )
 
 
 def _aware(value):

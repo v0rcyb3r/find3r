@@ -845,3 +845,19 @@ def test_tier_c_source_pauses_until_an_analyst_approves(engine, ledger, gate):
     approved = ex.execute(FakeTierC(), Request("domain", "acme.com"), approved=True)
     assert approved.outcome == "collected"
     assert approved.facts_written == 1
+
+
+def test_repository_purge_classmethod_removes_expired_without_run_context(
+    engine, gate, ledger, engagement, no_network
+):
+    """The cron/CLI entry point purges engine-wide with no company or run id."""
+    ex, _ = executor_for(engine, gate, ledger, engagement)
+    ex.execute(CrtShAdapter(), Request("domain", "acme.com"))
+    with engine.connect() as conn:
+        assert conn.execute(sa.select(sa.func.count()).select_from(schema.fact)).scalar() > 0
+
+    counts = Repository.purge(engine, now=NOW + timedelta(days=3650))
+    assert counts["fact"] > 0
+    with engine.connect() as conn:
+        assert conn.execute(sa.select(sa.func.count()).select_from(schema.fact)).scalar() == 0
+        assert conn.execute(sa.select(sa.func.count()).select_from(schema.source_record)).scalar() == 0

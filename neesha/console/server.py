@@ -154,13 +154,17 @@ class Workspace:
                 self.analyzing.discard(run_id)
 
     def _save_analysis(self, run_id, result):
+        from neesha.config import harden_path
         path = self._analysis_path(run_id)
         path.parent.mkdir(parents=True, exist_ok=True)
+        harden_path(self.reports_root)
+        harden_path(path.parent)
         temporary = path.with_suffix('.json.tmp')
         if temporary.is_symlink():
             raise ValueError('Model report storage must not contain symbolic links.')
         temporary.write_text(json.dumps(result, indent=2) + '\n')
         temporary.replace(path)
+        harden_path(path)
 
     def delete(self, run_id):
         from neesha.harness.deletion import delete_investigation
@@ -374,7 +378,13 @@ def make_handler(workspace: Workspace):
 def serve(engine: sa.Engine, port: int = 8765):
     if not sa.inspect(engine).has_table('engagement'):
         raise ValueError('Initialize the harness database with alembic upgrade head first.')
-    server = ThreadingHTTPServer(('127.0.0.1', port), make_handler(Workspace(engine)))
+    workspace = Workspace(engine)
+    # Reports hold personal data and are not encrypted at rest: keep the tree
+    # owner-only so other local users cannot read exported briefings.
+    from neesha.config import harden_path
+    if workspace.reports_root.exists():
+        harden_path(workspace.reports_root)
+    server = ThreadingHTTPServer(('127.0.0.1', port), make_handler(workspace))
     print(f'NEESHA workspace: http://127.0.0.1:{server.server_port} (Ctrl-C to stop)')
     try:
         server.serve_forever()

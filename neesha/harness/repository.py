@@ -381,6 +381,15 @@ class Repository:
 
     # ---- retention -------------------------------------------------------
 
+    @classmethod
+    def purge(cls, engine: sa.Engine, now: Optional[datetime] = None) -> dict[str, int]:
+        """Retention purge not tied to one run, for the CLI and cron.
+
+        Purging is engine-wide, so it needs no company or run context; this
+        avoids callers inventing placeholder ids to reach ``purge_expired``.
+        """
+        return cls(engine, company_id="", run_id="").purge_expired(now)
+
     def purge_expired(self, now: Optional[datetime] = None) -> dict[str, int]:
         """Delete everything past its retention date.
 

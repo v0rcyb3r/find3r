@@ -13,6 +13,25 @@ from pathlib import Path
 DEFAULT_CONFIG_PATH = Path("neesha.toml")
 
 
+def harden_path(path: Path) -> None:
+    """Best-effort restrict local harness storage to its owner.
+
+    The harness database and reports hold personal data and are not encrypted
+    at rest, so they must not be group- or world-readable: directories become
+    0700 and files 0600. A directory at 0700 also blocks other local users
+    from traversing to the files inside it, which is the control that matters
+    for the SQLite database created lazily within. POSIX only; a no-op where
+    chmod is unavailable.
+    """
+    try:
+        if path.is_dir():
+            path.chmod(0o700)
+        elif path.exists():
+            path.chmod(0o600)
+    except (OSError, NotImplementedError):
+        pass
+
+
 @dataclass
 class Config:
     mode: str = "local"  # local | vps | hybrid
