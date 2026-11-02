@@ -709,3 +709,139 @@ def test_requirement_cannot_be_answered_by_a_less_specific_attribute(engine):
         StepResult('fixture', 'collected', attributes=['email.dmarc'])
     ])
     assert requirement.status == 'unanswerable'
+
+
+# ---- step 2 hardening: crashes, gap attribution, tier-C approval --------
+
+
+def test_an_unexpected_adapter_crash_is_a_gap_and_releases_budget(
+    engine, gate, ledger, engagement, no_network, monkeypatch
+):
+    """A non-AdapterError from a paid source must be a recorded gap, not a
+    run-ender, and must not leak its reservation into the month's spend."""
+    monkeypatch.setenv("HUNTER_API_KEY", "k")
+
+    class Boom(HunterAdapter):
+        def fetch(self, reference):
+            raise RuntimeError("socket blew up mid-fetch")
+
+    ex, _ = executor_for(engine, gate, ledger, engagement)
+    result = ex.execute(Boom(), Request("domain", "acme.com"))
+
+    assert result.outcome == "failed"
+    assert "unexpected adapter error" in result.reason
+    # The crash message is never echoed into the gap reason.
+    assert "socket blew up" not in result.reason
+    assert result.cost_usd == Decimal("0")
+    assert result.facts_written == 0
+    assert ledger.summary().committed_usd == Decimal("0")
+
+
+def test_a_crash_in_the_run_loop_marks_the_run_failed_not_running(
+    engine, ledger, gate, seeded_engagement, no_network
+):
+    """An unexpected error mid-loop must not wedge the run at 'running'
+    forever — it is recorded as failed so an operator and deletion can see it."""
+
+    def boom(update):
+        raise RuntimeError("telemetry down")
+
+    with pytest.raises(RuntimeError):
+        execute_run(
+            engine=engine, ledger=ledger, gate=gate, company="acme.com",
+            engagement=seeded_engagement, analyst="a",
+            pir_templates=("attack-surface",), caps=CAPS, progress=boom,
+        )
+    with engine.connect() as conn:
+        row = conn.execute(
+            sa.select(schema.run.c.status, schema.run.c.stop_reason)
+        ).one()
+    assert row.status == "failed"
+    assert row.stop_reason == "internal_error"
+
+
+def test_a_failing_source_is_blamed_only_for_requirements_it_served(
+    engine, ledger, gate, seeded_engagement
+):
+    """One source timing out must not be reported as the reason an unrelated
+    requirement went unanswered."""
+    from neesha.adapters.base import RawResult
+    from neesha.adapters.dns_posture import DnsPostureAdapter
+
+    class FailCrt(CrtShAdapter):
+        def search(self, request):
+            raise AdapterError("crt.sh timed out")
+
+    class EmptyDns(DnsPostureAdapter):
+        def fetch(self, reference):
+            return RawResult(payload=b"[]", request_url=reference.url,
+                             origin_url=reference.url)
+
+    report = execute_run(
+        engine=engine, ledger=ledger, gate=gate, company="acme.com",
+        engagement=seeded_engagement, analyst="a",
+        pir_templates=("email-posture", "attack-surface"),
+        sources={"crt.sh", "dns-posture"}, tiers={"A"},
+        adapters={"crt.sh": FailCrt(), "dns-posture": EmptyDns()}, caps=CAPS,
+    )
+    gaps = {p.question: (p.gap_reason or "") for p in report.pirs}
+    dns_question = "What SPF and DMARC policies are published?"
+    surface_question = "What hostnames does this company expose?"
+    assert "crt.sh" not in gaps[dns_question]
+    assert "crt.sh" in gaps[surface_question]
+
+
+def test_tier_c_source_pauses_until_an_analyst_approves(engine, ledger, gate):
+    """Tier C is never automatic: the gate pauses it, and only an explicit
+    analyst approval lets the same step through."""
+    from neesha.adapters.base import BaseAdapter, Cost, FactDraft, RawResult, Reference
+
+    class FakeTierC(BaseAdapter):
+        name = "fake-tierc"
+        tier = "C"
+        source_type = "commercial_api"
+        produces = frozenset({"breach.aggregate"})
+        accepts = frozenset({"domain"})
+
+        def estimate_cost(self, request):
+            return Cost()  # free, so this isolates the approval gate from budget
+
+        def search(self, request):
+            return [Reference(url="test://x", origin_url="test://x")]
+
+        def fetch(self, reference):
+            return RawResult(payload=b"{}", request_url="test://x",
+                             origin_url="test://x")
+
+        def parse(self, raw, request):
+            return [FactDraft(attribute="breach.aggregate", value="0",
+                              entity_kind="company", entity_name=request.value)]
+
+    client = EngagementView(
+        id="eng-c", authority_basis="client_engagement",
+        authorized_domains=("acme.com",),
+        starts_at=NOW - timedelta(days=1), expires_at=NOW + timedelta(days=29),
+    )
+    company_id = Repository.ensure_company(engine, "acme.com")
+    with engine.begin() as conn:
+        conn.execute(schema.engagement.insert().values(
+            id=client.id, authority_basis="client_engagement", client_name="Acme Inc",
+            authorized_domains=["acme.com"], permitted_techniques=[], authorized_by="a",
+            starts_at=client.starts_at, expires_at=client.expires_at, created_at=NOW,
+        ))
+        conn.execute(schema.run.insert().values(
+            id="run-c", engagement_id=client.id, company_id=company_id, analyst="a",
+            status="running", max_steps=CAPS.max_steps, max_spend_usd=CAPS.max_spend_usd,
+            max_wall_secs=CAPS.max_wall_secs, started_at=NOW,
+        ))
+    repo = Repository(engine, company_id=company_id, run_id="run-c")
+    ex = Executor(gate=gate, ledger=ledger, repository=repo, engagement=client,
+                  analyst="a", caps=CAPS)
+
+    paused = ex.execute(FakeTierC(), Request("domain", "acme.com"))
+    assert paused.outcome == "paused"
+    assert paused.facts_written == 0
+
+    approved = ex.execute(FakeTierC(), Request("domain", "acme.com"), approved=True)
+    assert approved.outcome == "collected"
+    assert approved.facts_written == 1

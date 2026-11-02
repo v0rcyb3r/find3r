@@ -81,6 +81,7 @@ def execute_run(
     sources: Optional[set[str]] = None,
     progress: Optional[Callable[[dict], None]] = None,
     subject_kind: str = "domain",
+    approve: Optional[set[str]] = None,
 ) -> RunReport:
     """Run one cycle and return what it learned and what it did not.
 
@@ -138,53 +139,68 @@ def execute_run(
     skipped: list[dict] = list(plan.skipped)
     state = RunState()
     stop_reason = STOP_COMPLETE
+    approve = approve or set()
 
-    for step in plan.steps:
-        elapsed = time.monotonic() - monotonic_start
-        halt = _stop_condition(state, caps, elapsed)
-        if halt:
-            stop_reason = halt
-            # Everything from here on is explicitly unrun, with a reason.
-            skipped.extend(
-                {"adapter": s.adapter_name, "reason": halt}
-                for s in plan.steps[plan.steps.index(step) :]
+    try:
+        for step in plan.steps:
+            elapsed = time.monotonic() - monotonic_start
+            halt = _stop_condition(state, caps, elapsed)
+            if halt:
+                stop_reason = halt
+                # Everything from here on is explicitly unrun, with a reason.
+                skipped.extend(
+                    {"adapter": s.adapter_name, "reason": halt}
+                    for s in plan.steps[plan.steps.index(step) :]
+                )
+                break
+
+            adapter = (
+                adapters.get(step.adapter_name)
+                if adapters
+                else registry.build(step.adapter_name)
             )
-            break
+            if adapter is None:
+                skipped.append(
+                    {"adapter": step.adapter_name, "reason": "adapter unavailable"}
+                )
+                continue
 
-        adapter = (
-            adapters.get(step.adapter_name)
-            if adapters
-            else registry.build(step.adapter_name)
-        )
-        if adapter is None:
-            skipped.append(
-                {"adapter": step.adapter_name, "reason": "adapter unavailable"}
+            if progress:
+                progress({"current_source": step.adapter_name, "completed": len(steps),
+                          "total": len(plan.steps)})
+            result = executor.execute(
+                adapter,
+                step.request,
+                state=RunState(
+                    steps_used=state.steps_used,
+                    spend_used=state.spend_used,
+                    elapsed_secs=elapsed,
+                ),
+                approved=step.adapter_name in approve,
             )
-            continue
-
-        if progress:
-            progress({"current_source": step.adapter_name, "completed": len(steps),
-                      "total": len(plan.steps)})
-        result = executor.execute(
-            adapter,
-            step.request,
-            state=RunState(
-                steps_used=state.steps_used,
-                spend_used=state.spend_used,
-                elapsed_secs=elapsed,
-            ),
-        )
-        steps.append(result)
-        if progress:
-            progress({"current_source": step.adapter_name, "completed": len(steps),
-                      "total": len(plan.steps), "last_outcome": result.outcome})
-        state = RunState(
-            steps_used=state.steps_used + 1,
-            spend_used=state.spend_used + result.cost_usd,
-            elapsed_secs=time.monotonic() - monotonic_start,
-        )
-        if not result.productive:
-            skipped.append({"adapter": result.adapter, "reason": result.reason})
+            steps.append(result)
+            if progress:
+                progress({"current_source": step.adapter_name, "completed": len(steps),
+                          "total": len(plan.steps), "last_outcome": result.outcome})
+            state = RunState(
+                steps_used=state.steps_used + 1,
+                spend_used=state.spend_used + result.cost_usd,
+                elapsed_secs=time.monotonic() - monotonic_start,
+            )
+            if not result.productive:
+                skipped.append({"adapter": result.adapter, "reason": result.reason})
+    except Exception:
+        # A crash mid-loop must not leave the run wedged at "running" forever.
+        # Record the failure so an operator can see it and so deletion is not
+        # blocked by a run that is no longer active.
+        with engine.begin() as conn:
+            conn.execute(
+                schema.run.update()
+                .where(schema.run.c.id == run_id)
+                .values(status="failed", stop_reason="internal_error",
+                        skipped=skipped, ended_at=_now())
+            )
+        raise
 
     _resolve_pirs(engine, plan, company_id, run_id, steps)
     _persist_pirs(engine, run_id, plan.pirs)
@@ -245,6 +261,13 @@ def _resolve_pirs(
     failure_reasons = {
         s.adapter: s.reason for s in steps if not s.productive and s.reason
     }
+    # Which adapters were planned to serve each requirement, so a failure is
+    # only ever reported against a PIR that adapter was actually meant to
+    # answer — one source timing out must not be blamed for an unrelated gap.
+    serving: dict[str, set[str]] = {}
+    for step in plan.steps:
+        for pir_id in step.serves:
+            serving.setdefault(pir_id, set()).add(step.adapter_name)
 
     for pir in plan.pirs:
         if pir.status == "unanswerable":
@@ -266,8 +289,13 @@ def _resolve_pirs(
             pir.gap_reason = f"no data collected for {', '.join(missing)}"
         else:
             pir.status = "unanswerable"
+            relevant = {
+                adapter: failure_reasons[adapter]
+                for adapter in serving.get(pir.id, set())
+                if adapter in failure_reasons
+            }
             pir.gap_reason = (
-                "; ".join(f"{k}: {v}" for k, v in failure_reasons.items())
+                "; ".join(f"{k}: {v}" for k, v in sorted(relevant.items()))
                 or pir.gap_reason
                 or "sources ran but produced none of the required attributes"
             )

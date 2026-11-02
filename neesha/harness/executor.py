@@ -194,12 +194,18 @@ class Executor:
             references = adapter.search(request)
         except AdapterError as exc:
             return None, f"search failed: {exc}"
+        except Exception:
+            # An unexpected adapter crash is still a gap, not a run-ender, and
+            # its message may carry a provider URL or key, so it is not echoed.
+            return None, "search failed: unexpected adapter error"
         if not references:
             return None, "no results"
         try:
             return adapter.fetch(references[0]), None
         except AdapterError as exc:
             return None, f"fetch failed: {exc}"
+        except Exception:
+            return None, "fetch failed: unexpected adapter error"
 
     def _settle(self, decision: Decision, estimate: Decimal) -> Decimal:
         """Settle a reservation at the actual cost.

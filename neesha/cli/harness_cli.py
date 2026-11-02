@@ -217,6 +217,10 @@ def harness_run(
         None, "--pir", help="PIR template (repeatable)"
     ),
     analyst: Optional[str] = typer.Option(None, "--analyst"),
+    approve: Optional[list[str]] = typer.Option(
+        None, "--approve",
+        help="Adapter name an analyst approves to run (e.g. a tier-C source); repeatable",
+    ),
     max_steps: int = typer.Option(25, "--max-steps"),
     max_spend: float = typer.Option(1.00, "--max-spend", help="Per-run USD cap"),
     max_seconds: int = typer.Option(600, "--max-seconds"),
@@ -226,7 +230,7 @@ def harness_run(
     engine = get_engine()
     _require_schema(engine)
 
-    view = _resolve_engagement(engine, engagement_id)
+    view = _resolve_engagement(engine, engagement_id, company)
     if not view.covers(company):
         console.print(
             f"[red]blocked:[/red] engagement {view.id[:12]} does not authorize "
@@ -258,6 +262,7 @@ def harness_run(
                 max_spend_usd=Decimal(str(max_spend)),
                 max_wall_secs=max_seconds,
             ),
+            approve=set(approve or []),
         )
     except KeyError as exc:
         console.print(f"[red]{exc}[/red]")
@@ -270,27 +275,11 @@ def harness_run(
         console.print(f"briefing: {path}")
 
 
-def _resolve_engagement(engine: sa.Engine, engagement_id: Optional[str]) -> EngagementView:
-    with engine.connect() as conn:
-        query = sa.select(schema.engagement)
-        if engagement_id:
-            query = query.where(schema.engagement.c.id.like(f"{engagement_id}%"))
-        else:
-            query = query.where(schema.engagement.c.expires_at > _now()).order_by(
-                schema.engagement.c.created_at.desc()
-            )
-        row = conn.execute(query).first()
+def _aware(value):
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
 
-    if row is None:
-        console.print(
-            "[red]no engagement in force[/red] — collection is not authorized.\n"
-            "  neesha harness engagement create --domain acme.com --by you@example"
-        )
-        raise typer.Exit(1)
 
-    def _aware(value):
-        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
-
+def _view_of(row) -> EngagementView:
     return EngagementView(
         id=row.id,
         authority_basis=row.authority_basis,
@@ -300,6 +289,50 @@ def _resolve_engagement(engine: sa.Engine, engagement_id: Optional[str]) -> Enga
         starts_at=_aware(row.starts_at),
         expires_at=_aware(row.expires_at),
     )
+
+
+def _resolve_engagement(
+    engine: sa.Engine, engagement_id: Optional[str], target: Optional[str] = None
+) -> EngagementView:
+    with engine.connect() as conn:
+        if engagement_id:
+            row = conn.execute(
+                sa.select(schema.engagement).where(
+                    schema.engagement.c.id.like(f"{engagement_id}%")
+                )
+            ).first()
+            if row is not None:
+                return _view_of(row)
+            console.print(
+                "[red]no engagement in force[/red] — collection is not authorized.\n"
+                "  neesha harness engagement create --domain acme.com --by you@example"
+            )
+            raise typer.Exit(1)
+
+        # No id given: among in-force engagements, newest first, pick the one
+        # that actually authorizes this target rather than blindly taking the
+        # newest and then refusing the run.
+        rows = conn.execute(
+            sa.select(schema.engagement)
+            .where(schema.engagement.c.expires_at > _now())
+            .order_by(schema.engagement.c.created_at.desc())
+        ).all()
+
+    if not rows:
+        console.print(
+            "[red]no engagement in force[/red] — collection is not authorized.\n"
+            "  neesha harness engagement create --domain acme.com --by you@example"
+        )
+        raise typer.Exit(1)
+
+    views = [_view_of(row) for row in rows]
+    if target:
+        for view in views:
+            if view.covers(target):
+                return view
+    # None covers the target; return the newest so the caller reports the
+    # authorization gap with a concrete engagement id.
+    return views[0]
 
 
 def _print_report(report) -> None:
