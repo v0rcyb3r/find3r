@@ -301,13 +301,17 @@ correctly returned no public matches. Positive matching and Gmail routing are
 covered with fixture-based tests.
 
 [Holehe](https://github.com/megadose/holehe) and
-[Socialscan](https://github.com/iojw/socialscan) are integrated as **Tier C,
-client-engagement-gated** account-enumeration runners. They check an exact email
-against third-party sign-up/recovery endpoints, so, like the IntelX aggregate
-connector, they run only under a `client_engagement` whose scope authorizes the
-exact subject and lists the `account_enumeration` technique, with per-step analyst
-approval — operator self-authorization never reaches them, and they are off by
-default. Only the per-service existence of an account and a count are kept: the
+[Socialscan](https://github.com/iojw/socialscan) (by exact email), and
+[Sherlock](https://github.com/sherlock-project/sherlock) and
+[Maigret](https://github.com/soxoj/maigret) (by exact username), are integrated
+as **Tier C, client-engagement-gated** account-enumeration runners. They check a
+subject against third-party sign-up/recovery endpoints, so, like the IntelX
+aggregate connector, they run only under a `client_engagement` whose scope
+authorizes the exact subject and lists the `account_enumeration` technique, with
+per-step analyst approval — operator self-authorization never reaches them, and
+they are off by default. A username is a first-class research subject
+(`neesha harness run <username> --kind username`, authorized with
+`engagement create --username`); a username establishes no real-world identity. Only the per-service existence of an account and a count are kept: the
 tools' recovery-email and phone hints are discarded before anything is cached,
 stored, or exported. Registration coverage (an account exists) is explicitly
 distinguished from a public appearance, and is never proof of identity, ownership,

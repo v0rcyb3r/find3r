@@ -29,15 +29,16 @@ def build_brief(engine: sa.Engine, run_id: str, profile=None) -> dict:
         root = conn.execute(sa.select(schema.entity).where(
             schema.entity.c.id == run['company_id'])).mappings().one()
         company = root['canonical_name']
-        subject_kind = 'email' if root['kind'] == 'email' else 'company'
+        subject_kind = root['kind'] if root['kind'] in ('email', 'username') else 'company'
+        root_subject = subject_kind in ('email', 'username')
         from neesha.resolve.intake import resolve_seed
-        seed = resolve_seed(company, 'email' if subject_kind == 'email' else 'domain')
+        seed = resolve_seed(company, subject_kind if root_subject else 'domain')
         allowed_sensitivity = (sa.or_(
             schema.fact.c.sensitivity == 'business',
             sa.and_(schema.fact.c.sensitivity == 'personal',
                     schema.fact.c.entity_id == run['company_id'],
                     schema.fact.c.attribute.startswith('public.', autoescape=True)),
-        ) if subject_kind == 'email' else schema.fact.c.sensitivity == 'business')
+        ) if root_subject else schema.fact.c.sensitivity == 'business')
         requirements = [dict(row) for row in conn.execute(
             sa.select(schema.pir).where(schema.pir.c.run_id == run_id)
         ).mappings()]
@@ -125,17 +126,17 @@ def build_brief(engine: sa.Engine, run_id: str, profile=None) -> dict:
                         'unavailable' if name in skipped else 'observations' if count else 'no matching data'),
             'reason': skipped.get(name, attempt['decision_reason']),
         })
-    scores = score_brief(facts, profile) if subject_kind != 'email' else score_brief([])
-    if subject_kind == 'email':
+    scores = score_brief(facts, profile) if not root_subject else score_brief([])
+    if root_subject:
         for score in scores.values():
             score['configured'] = False
-            score['explanation'] = 'Company service-fit and infrastructure-posture scoring do not apply to an independent email investigation.'
+            score['explanation'] = f'Company service-fit and infrastructure-posture scoring do not apply to an independent {subject_kind} investigation.'
     return {
         'subject_kind': subject_kind, 'seed': seed,
         'scores': scores,
         'collection': collection,
         'graph': build_graph(company, facts, subject_kind=subject_kind),
-        'power_map': build_power_map(facts) if subject_kind != 'email' else [],
+        'power_map': build_power_map(facts) if not root_subject else [],
         'run_id': run_id, 'company': company, 'status': run['status'],
         'stop_reason': run['stop_reason'], 'requirements': requirements,
         'facts': facts, 'inferences': inferences, 'skipped': run['skipped'] or [],

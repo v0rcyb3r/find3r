@@ -135,3 +135,96 @@ def test_graph_renders_account_nodes_from_evidence():
     accounts = [n for n in graph["nodes"] if n["kind"] == "account"]
     assert [n["label"] for n in accounts] == ["github.com"]
     assert any(e["kind"] == "account_observed" for e in graph["edges"])
+
+
+# ---- username tools (Sherlock, Maigret) ---------------------------------
+
+from neesha.adapters.sherlock import SherlockAdapter, parse_found_sites
+from neesha.adapters.maigret import MaigretAdapter
+
+USERNAME_ADAPTERS = [SherlockAdapter, MaigretAdapter]
+
+
+@pytest.mark.parametrize("cls", USERNAME_ADAPTERS)
+def test_username_tool_contract(cls):
+    assert cls.tier == "C"
+    assert cls.accepts == frozenset({"username"})
+    assert cls.subject_entity_kind == "username"
+    assert cls.requires_techniques == frozenset({"account_enumeration"})
+    assert cls.default_enabled is False
+
+
+def test_parse_found_sites_keeps_only_plus_site_names():
+    out = (b"[*] Checking username jdoe on:\n"
+           b"[+] GitHub: https://github.com/jdoe\n"
+           b"[+] Reddit: https://reddit.com/user/jdoe\n"
+           b"[-] Twitter: Not Found!\n")
+    assert parse_found_sites(out, 50) == ["github", "reddit"]
+
+
+def test_username_parse_yields_username_scoped_personal_facts():
+    ref = Reference(url="tool://sherlock/jdoe", origin_url="tool://sherlock/")
+    raw = SherlockAdapter()._sanitized("jdoe", ["github", "reddit"], ref)
+    facts = SherlockAdapter().parse(raw, Request("username", "jdoe"))
+    by = {(f.attribute, f.value) for f in facts}
+    assert ("public.account.found", "github") in by
+    assert all(f.entity_kind == "username" and f.sensitivity == "personal" for f in facts)
+    assert all(f.identity_key == "username:jdoe" for f in facts)
+
+
+def test_gate_covers_username_only_when_authorized(engine):
+    allowed = EngagementView(id="e", authority_basis="client_engagement",
+                             authorized_usernames=("jdoe",),
+                             permitted_techniques=frozenset({"account_enumeration"}),
+                             starts_at=NOW - timedelta(days=1), expires_at=NOW + timedelta(days=1))
+    spec = AdapterSpec(name="sherlock", tier="C", collection_mode="third_party_passive",
+                       requires_techniques=frozenset({"account_enumeration"}))
+    gate = _gate(engine)
+    ok = gate.authorize(adapter=spec, target="jdoe", engagement=allowed, analyst="a",
+                        caps=CAPS, state=RunState(), approved=True, subject_kind="username")
+    assert ok.outcome == "allowed"
+    other = gate.authorize(adapter=spec, target="someoneelse", engagement=allowed, analyst="a",
+                           caps=CAPS, state=RunState(), approved=True, subject_kind="username")
+    assert other.outcome == "denied"
+
+
+def test_username_run_end_to_end_under_a_client_engagement(engine):
+    import json
+    from datetime import datetime, timezone
+    from neesha.db import schema
+    from neesha.harness.run import execute_run
+    from neesha.harness.brief import build_brief
+    from neesha.ledger.ledger import Ledger
+    now = datetime(2026, 11, 2, tzinfo=timezone.utc)
+    view = EngagementView(id="ec", authority_basis="client_engagement",
+                          authorized_usernames=("jdoe",),
+                          permitted_techniques=frozenset({"account_enumeration"}),
+                          starts_at=now - timedelta(days=1), expires_at=now + timedelta(days=1))
+    with engine.begin() as conn:
+        conn.execute(schema.engagement.insert().values(
+            id="ec", authority_basis="client_engagement", client_name="Acme",
+            authorized_domains=[], authorized_emails=[], authorized_usernames=["jdoe"],
+            permitted_techniques=["account_enumeration"], authorized_by="a",
+            starts_at=now - timedelta(days=1), expires_at=now + timedelta(days=1), created_at=now))
+    ledger = Ledger(engine); ledger.set_cap("100.00", period="2026-11")
+    gate = PolicyGate(engine, ledger, clock=lambda: now)
+
+    class StubSherlock(SherlockAdapter):
+        @classmethod
+        def binary(cls):
+            return "/usr/bin/true"
+
+        def fetch(self, reference):
+            return self._sanitized("jdoe", ["github", "reddit"], reference)
+
+    report = execute_run(engine=engine, ledger=ledger, gate=gate, company="jdoe",
+                         engagement=view, analyst="a", subject_kind="username",
+                         pir_templates=("username-account-presence",),
+                         sources={"sherlock"}, tiers={"C"},
+                         adapters={"sherlock": StubSherlock()}, approve={"sherlock"})
+    assert report.facts_written >= 2
+    brief = build_brief(engine, report.run_id)
+    assert brief["subject_kind"] == "username"
+    accounts = [n for n in brief["graph"]["nodes"] if n["kind"] == "account"]
+    assert {n["label"] for n in accounts} == {"github", "reddit"}
+    assert any(f["attribute"] == "public.account.found" for f in brief["facts"])

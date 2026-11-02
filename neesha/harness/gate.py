@@ -77,15 +77,26 @@ class EngagementView:
     starts_at: Optional[datetime] = None
     expires_at: Optional[datetime] = None
     authorized_emails: tuple[str, ...] = ()
+    authorized_usernames: tuple[str, ...] = ()
 
-    def covers(self, target: str) -> bool:
-        """Match a domain scope or an independently authorized exact email.
+    def covers(self, target: str, subject_kind: Optional[str] = None) -> bool:
+        """Match an authorized domain, exact email, or exact username.
 
         An empty list authorizes nothing. Defaulting to "all" here would make
-        an unconfigured engagement the most permissive one.
+        an unconfigured engagement the most permissive one. ``subject_kind``
+        disambiguates a username from a domain-like string; without it, the
+        kind is inferred from an ``@`` (email) and otherwise treated as a
+        domain, preserving the original behaviour.
         """
-        if '@' in target:
-            from neesha.resolve.intake import resolve_seed
+        from neesha.resolve.intake import resolve_seed
+        if subject_kind == 'username':
+            try:
+                normalized = resolve_seed(target, 'username')['normalized']
+                allowed = {resolve_seed(u, 'username')['normalized'] for u in self.authorized_usernames}
+            except ValueError:
+                return False
+            return normalized in allowed
+        if subject_kind == 'email' or ('@' in target and subject_kind is None):
             try:
                 normalized = resolve_seed(target, 'email')['normalized']
                 allowed = {resolve_seed(email, 'email')['normalized'] for email in self.authorized_emails}
@@ -152,6 +163,7 @@ class PolicyGate:
         estimated_usd=Decimal("0"),
         run_id: Optional[str] = None,
         approved: bool = False,
+        subject_kind: Optional[str] = None,
     ) -> Decision:
         estimate = Decimal(str(estimated_usd))
         decision = self._decide(
@@ -163,6 +175,7 @@ class PolicyGate:
             estimate=estimate,
             run_id=run_id,
             approved=approved,
+            subject_kind=subject_kind,
         )
         self._log(
             adapter=adapter,
@@ -188,6 +201,7 @@ class PolicyGate:
         estimate: Decimal,
         run_id: Optional[str],
         approved: bool,
+        subject_kind: Optional[str] = None,
     ) -> Decision:
         now = self._clock()
 
@@ -202,15 +216,15 @@ class PolicyGate:
             )
 
         # 2. Is this target ours to look at?
-        if not engagement.covers(target):
+        if not engagement.covers(target, subject_kind):
             return Decision(
                 "denied",
-                f"{target!r} is not an authorized domain or exact email for engagement "
-                f"{engagement.id}",
+                f"{target!r} is not an authorized domain, exact email, or username "
+                f"for engagement {engagement.id}",
             )
 
-        if '@' in target and adapter.collection_mode != 'third_party_passive':
-            return Decision('denied', 'Email-root research permits public-source passive collection only.')
+        if (subject_kind in ('email', 'username') or '@' in target) and adapter.collection_mode != 'third_party_passive':
+            return Decision('denied', 'Email- and username-root research permit public-source passive collection only.')
 
         # 3. Does the authority basis permit this tier?
         if adapter.tier == "D":

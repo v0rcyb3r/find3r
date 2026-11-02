@@ -41,6 +41,17 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ACCOUNT_ENUMERATION = "account_enumeration"
 
 
+def normalize_subject(kind: str, value: str) -> str:
+    """Canonicalize the subject for an email- or username-based tool."""
+    if kind == "email":
+        return normalize_email(value)
+    from neesha.resolve.intake import resolve_seed
+    try:
+        return resolve_seed(value, "username")["normalized"]
+    except ValueError as exc:
+        raise AdapterError(str(exc)) from None
+
+
 class AccountEnumAdapter(BaseAdapter):
     """Base for a gated, aggregate-only account-enumeration tool runner."""
 
@@ -50,6 +61,8 @@ class AccountEnumAdapter(BaseAdapter):
     default_enabled: ClassVar[bool] = False
     requires_techniques: ClassVar[frozenset[str]] = frozenset({ACCOUNT_ENUMERATION})
     accepts: ClassVar[frozenset[str]] = frozenset({"email"})
+    # The subject kind this tool enumerates: 'email' or 'username'.
+    subject_entity_kind: ClassVar[str] = "email"
     retention_days: ClassVar[int] = 7
 
     binary_name: ClassVar[str] = ""
@@ -73,7 +86,7 @@ class AccountEnumAdapter(BaseAdapter):
                            "subject, the account_enumeration technique, analyst approval, and budget.")}
 
     def search(self, request: Request) -> list[Reference]:
-        subject = normalize_email(request.value)
+        subject = normalize_subject(self.subject_entity_kind, request.value)
         return [Reference(url=f"tool://{self.name}/" + quote(subject, safe=""),
                           origin_url=f"tool://{self.name}/", label=subject)]
 
@@ -152,7 +165,7 @@ class AccountEnumAdapter(BaseAdapter):
                          collected_at=datetime.now(timezone.utc))
 
     def parse(self, raw: RawResult, request: Request) -> list[FactDraft]:
-        subject = normalize_email(request.value)
+        subject = normalize_subject(self.subject_entity_kind, request.value)
         try:
             data = json.loads(raw.payload)
         except (ValueError, UnicodeError):
@@ -164,9 +177,11 @@ class AccountEnumAdapter(BaseAdapter):
             raise AdapterError(f"Invalid sanitized {self.name} metadata")
         services = sorted({s for s in services if s.strip()})[: self.max_services]
 
+        kind = self.subject_entity_kind
+
         def account_fact(attribute: str, value: str) -> FactDraft:
-            return FactDraft(attribute=attribute, value=value, entity_kind="email",
-                             entity_name=subject, identity_key="email:" + subject,
+            return FactDraft(attribute=attribute, value=value, entity_kind=kind,
+                             entity_name=subject, identity_key=kind + ":" + subject,
                              sensitivity="personal")
 
         facts = [account_fact("public.account.summary.count", str(len(services)))]

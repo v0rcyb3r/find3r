@@ -114,6 +114,7 @@ class Executor:
             estimated_usd=estimate,
             run_id=self.repo.run_id,
             approved=approved,
+            subject_kind=request.entity_kind,
         )
         if decision.outcome == DENIED:
             return StepResult(spec.name, DENIED, decision.reason)

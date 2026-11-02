@@ -109,6 +109,27 @@ class Repository:
             ))
             return identity
 
+    @classmethod
+    def ensure_username(cls, engine: sa.Engine, handle: str) -> str:
+        """A username can be a research root; it manufactures no company/person."""
+        from neesha.resolve.intake import resolve_seed
+        canonical = resolve_seed(handle, 'username')['normalized']
+        with engine.begin() as conn:
+            existing = conn.execute(sa.select(schema.entity.c.id).where(
+                schema.entity.c.kind == 'username', schema.entity.c.canonical_name == canonical,
+                schema.entity.c.company_id.is_(None),
+            )).scalar()
+            if existing:
+                return existing
+            identity = _id()
+            now = _now()
+            conn.execute(schema.entity.insert().values(
+                id=identity, kind='username', canonical_name=canonical, company_id=None,
+                aliases=[canonical], confidence='high', resolved_by='username-seed',
+                first_seen_at=now, last_seen_at=now,
+            ))
+            return identity
+
     def ensure_entity(self, conn, kind: str, name: str, identity_key: Optional[str] = None) -> str:
         """Find or create an entity inside this run's explicit research context.
 
@@ -120,15 +141,15 @@ class Repository:
         # stay separate; only an explicit stable identifier can reuse a person.
         if kind == "person":
             canonical = identity_key or ("unresolved-observation:" + _id())
-        if self.subject_kind == 'email':
-            if kind != 'email':
-                raise ValueError('Email-root observations cannot manufacture company or person entities.')
+        if self.subject_kind in ('email', 'username'):
+            if kind != self.subject_kind:
+                raise ValueError(f'{self.subject_kind}-root observations cannot manufacture other entities.')
             from neesha.resolve.intake import resolve_seed
-            canonical = resolve_seed(name, 'email')['normalized']
+            canonical = resolve_seed(name, self.subject_kind)['normalized']
             root_name = conn.execute(sa.select(schema.entity.c.canonical_name).where(
                 schema.entity.c.id == self.company_id)).scalar_one()
             if canonical != root_name:
-                raise ValueError('Email-root observations must concern the exact seed email.')
+                raise ValueError(f'{self.subject_kind}-root observations must concern the exact seed {self.subject_kind}.')
             return self.company_id
         if kind == "company":
             return self.company_id

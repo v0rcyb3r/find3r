@@ -10,7 +10,8 @@ import ipaddress
 import re
 from urllib.parse import urlsplit, urlunsplit
 
-KINDS = frozenset({'auto', 'website', 'domain', 'email', 'ip', 'phone', 'name', 'person', 'company'})
+KINDS = frozenset({'auto', 'website', 'domain', 'email', 'ip', 'phone', 'name', 'person', 'company', 'username'})
+_USERNAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}')
 _PUBLIC_MAILBOX_DOMAINS = frozenset({
     'gmail.com', 'googlemail.com', 'yahoo.com', 'yahoo.co.uk', 'yahoo.ca',
     'yahoo.co.in', 'ymail.com', 'rocketmail.com', 'outlook.com', 'hotmail.com',
@@ -141,6 +142,14 @@ def resolve_seed(value, kind='auto') -> dict:
                 reason='Exact email accepted for independent public-source research. A public mailbox provider does not identify an organization; no provider-domain research is authorized.')
         return _result('email', normalized, unresolved=False, candidates=[domain], candidate=True,
             reason='Exact email accepted for independent public-source research. The domain is only a separate research candidate; it does not identify a named person or establish company affiliation.')
+    if kind == 'username':
+        # Usernames are explicit subjects, never auto-classified from a name.
+        # Case is preserved; a username is not proof of a real-world identity.
+        candidate = value.strip()
+        if not _USERNAME.fullmatch(candidate):
+            raise ValueError('Enter a valid username (letters, digits, dot, dash, underscore; 1-64 chars).')
+        return _result('username', candidate, unresolved=False,
+            reason='Username accepted as an explicit research subject. It does not establish a real-world identity, account ownership, or company affiliation.')
     if kind == 'ip':
         try:
             address = ipaddress.ip_address(value)

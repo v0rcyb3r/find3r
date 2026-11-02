@@ -149,7 +149,7 @@ function renderScores(view){
 function renderGraph(view){
  const graph=brief.graph;if(!graph){view.append(empty('No graph available.','Reopen a completed investigation to build its evidence graph.'));return;}
  view.append(text('p',graph.identity_policy+' '+graph.context,'notice'));
- const categories=['organization','domain','person','email','account','phone','ip','url','observation'];
+ const categories=['organization','domain','person','email','username','account','phone','ip','url','observation'];
  const NODE_W=300,COL=NODE_W+60,ROW=75,MAXLEN=40;
  const all=graph.nodes;const shown=all.filter(n=>n.kind!=='observation').slice(0,55);const positions=new Map();const columns=new Map();
  categories.forEach(k=>columns.set(k,[]));shown.forEach(n=>columns.get(n.kind)?.push(n));

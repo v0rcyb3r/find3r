@@ -12,8 +12,9 @@ def build_graph(company: str, facts: list[dict], subject_kind: str = "company") 
         nodes.setdefault(identity, {'id':identity,'kind':kind,'label':label})
         return identity
 
-    org = None if subject_kind == 'email' else node('organization', company.lower(), company)
-    seed = (node('email', company, company) if subject_kind == 'email'
+    root_kind = subject_kind if subject_kind in ('email', 'username') else None
+    org = None if root_kind else node('organization', company.lower(), company)
+    seed = (node(root_kind, company, company) if root_kind
             else node('domain', company.lower(), company.lower()))
 
     def link(a,b,kind,fact):
@@ -47,7 +48,7 @@ def build_graph(company: str, facts: list[dict], subject_kind: str = "company") 
             continue
         if fact.get('entity_id') is not None and not isinstance(fact['entity_id'], str):
             continue
-        if subject_kind == 'email':
+        if root_kind:
             # Public provider metadata is not proof of identity, ownership, or
             # account registration. Never create a person/company from a label.
             if not attr.startswith('public.'):
@@ -97,5 +98,5 @@ def build_graph(company: str, facts: list[dict], subject_kind: str = "company") 
             link(seed,observation,'observed',fact)
     return {'nodes':list(nodes.values()),'edges':list(edges.values()),
             'identity_policy':'Explicit identifiers or source-scoped observations; no name-only identity merges.',
-            'context':('Independent exact-email observations. Public profile or commit metadata does not establish legal identity, account registration, or company affiliation.'
-                       if subject_kind == 'email' else 'The organization label is the investigation seed, not verified legal ownership. Historical DNS and archived URLs do not establish current ownership.')}
+            'context':(f'Independent exact-{root_kind} observations. Public profile, commit, or account-existence metadata does not establish legal identity, account ownership, or company affiliation.'
+                       if root_kind else 'The organization label is the investigation seed, not verified legal ownership. Historical DNS and archived URLs do not establish current ownership.')}

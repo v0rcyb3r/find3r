@@ -80,8 +80,14 @@ def _now() -> datetime:
 
 @engagement_app.command("create")
 def engagement_create(
-    domain: list[str] = typer.Option(
-        ..., "--domain", help="Authorized domain (repeatable)"
+    domain: Optional[list[str]] = typer.Option(
+        None, "--domain", help="Authorized domain (repeatable)"
+    ),
+    email: Optional[list[str]] = typer.Option(
+        None, "--email", help="Authorized exact email (repeatable)"
+    ),
+    username: Optional[list[str]] = typer.Option(
+        None, "--username", help="Authorized exact username (repeatable)"
     ),
     authority: str = typer.Option(
         "prospect_company", "--authority", help="|".join(AUTHORITY_BASES)
@@ -89,19 +95,30 @@ def engagement_create(
     authorized_by: str = typer.Option(..., "--by", help="Who authorized this"),
     client: Optional[str] = typer.Option(None, "--client", help="Client name"),
     technique: Optional[list[str]] = typer.Option(
-        None, "--technique", help="Permitted technique (repeatable)"
+        None, "--technique", help="Permitted technique, e.g. account_enumeration (repeatable)"
     ),
     days: int = typer.Option(30, "--days", help="How long this stays valid"),
     document: Optional[str] = typer.Option(
         None, "--document", help="Reference to the signed authorization"
     ),
 ) -> None:
-    """Authorize collection against one or more domains."""
+    """Authorize collection against domains, exact emails, and/or usernames."""
+    from neesha.resolve.intake import resolve_seed
+
     if authority not in AUTHORITY_BASES:
         console.print(f"[red]unknown authority {authority!r}[/red]")
         raise typer.Exit(1)
     if authority == "client_engagement" and not client:
         console.print("[red]--client is required for a client engagement[/red]")
+        raise typer.Exit(1)
+    if not (domain or email or username):
+        console.print("[red]authorize at least one --domain, --email, or --username[/red]")
+        raise typer.Exit(1)
+    try:
+        emails = [resolve_seed(e, "email")["normalized"] for e in (email or [])]
+        usernames = [resolve_seed(u, "username")["normalized"] for u in (username or [])]
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
 
     engine = get_engine()
@@ -115,7 +132,9 @@ def engagement_create(
                 authority_basis=authority,
                 client_name=client,
                 permitted_techniques=sorted(set(technique or [])),
-                authorized_domains=[d.strip().lower().rstrip(".") for d in domain],
+                authorized_domains=[d.strip().lower().rstrip(".") for d in (domain or [])],
+                authorized_emails=emails,
+                authorized_usernames=usernames,
                 authorized_by=authorized_by,
                 document_ref=document,
                 starts_at=now,
@@ -125,7 +144,9 @@ def engagement_create(
         )
     console.print(f"[green]engagement[/green] {engagement_id}")
     console.print(f"  authority:  {authority}")
-    console.print(f"  domains:    {', '.join(domain)}")
+    console.print(f"  domains:    {', '.join(domain or []) or 'none'}")
+    console.print(f"  emails:     {', '.join(emails) or 'none'}")
+    console.print(f"  usernames:  {', '.join(usernames) or 'none'}")
     console.print(f"  techniques: {', '.join(technique or []) or 'none'}")
     console.print(f"  expires:    {(now + timedelta(days=days)).date().isoformat()}")
 
@@ -245,23 +266,32 @@ def harness_run(
         30, "--days", min=1, max=90,
         help="Validity (days, 1-90) of a self-authorized engagement",
     ),
+    kind: str = typer.Option(
+        "auto", "--kind",
+        help="Subject kind: auto | domain | email | username (auto: email if it contains @, else domain)",
+    ),
     max_steps: int = typer.Option(25, "--max-steps"),
     max_spend: float = typer.Option(1.00, "--max-spend", help="Per-run USD cap"),
     max_seconds: int = typer.Option(600, "--max-seconds"),
     out: Path = typer.Option(Path("reports"), "--out", help="Briefing output directory"),
 ) -> None:
-    """Run one intelligence cycle against a company domain or exact email."""
+    """Run one intelligence cycle against a domain, exact email, or username."""
     engine = get_engine()
     _require_schema(engine)
     who = analyst or os.environ.get("USER", "analyst")
 
+    if kind not in ("auto", "domain", "email", "username"):
+        console.print("[red]--kind must be auto, domain, email, or username[/red]")
+        raise typer.Exit(1)
+    subject_kind = ("email" if "@" in company else "domain") if kind == "auto" else kind
+
     if engagement_id:
         view = _resolve_engagement(engine, engagement_id, company)
     else:
-        view = _covering_engagement(engine, company)
+        view = _covering_engagement(engine, company, subject_kind)
         if view is None and self_authorize:
             try:
-                view, subject = _self_authorize(engine, company, who, days)
+                view, subject = _self_authorize(engine, company, who, days, subject_kind)
             except ValueError as exc:
                 console.print(f"[red]cannot self-authorize:[/red] {exc}")
                 raise typer.Exit(1)
@@ -276,13 +306,14 @@ def harness_run(
             )
             raise typer.Exit(1)
 
-    if not view.covers(company):
+    if not view.covers(company, subject_kind):
         console.print(
             f"[red]blocked:[/red] engagement {view.id[:12]} does not authorize "
             f"{company!r}"
         )
         console.print(
-            f"  authorized: {', '.join(view.authorized_domains + view.authorized_emails) or 'nothing'}"
+            "  authorized: "
+            + (', '.join(view.authorized_domains + view.authorized_emails + view.authorized_usernames) or 'nothing')
         )
         raise typer.Exit(1)
 
@@ -290,10 +321,10 @@ def harness_run(
     # techniques, so the tier-C person-enumeration sources and active
     # collection stay gated exactly as before — this only removes setup for
     # the passive prospect/public research an operator is entitled to run.
-    subject_kind = "email" if "@" in company else "domain"
     ledger = Ledger(engine)
     gate = PolicyGate(engine, ledger)
-    default_template = "email-public-presence" if subject_kind == "email" else "attack-surface"
+    default_template = {"email": "email-public-presence",
+                        "username": "username-account-presence"}.get(subject_kind, "attack-surface")
     templates = tuple(pir or (default_template,))
 
     console.print(f"[bold]{company}[/bold]  engagement {view.id[:12]}  "
@@ -375,12 +406,15 @@ def _view_of(row) -> EngagementView:
         permitted_techniques=frozenset(row.permitted_techniques or []),
         authorized_domains=tuple(row.authorized_domains or []),
         authorized_emails=tuple(row.authorized_emails or []),
+        authorized_usernames=tuple(getattr(row, "authorized_usernames", None) or []),
         starts_at=_aware(row.starts_at),
         expires_at=_aware(row.expires_at),
     )
 
 
-def _covering_engagement(engine: sa.Engine, target: str) -> Optional[EngagementView]:
+def _covering_engagement(
+    engine: sa.Engine, target: str, subject_kind: Optional[str] = None
+) -> Optional[EngagementView]:
     """The most recent in-force engagement that authorizes this target, if any.
 
     Returns None rather than exiting, so callers can choose to self-authorize.
@@ -393,31 +427,35 @@ def _covering_engagement(engine: sa.Engine, target: str) -> Optional[EngagementV
         ).all()
     for row in rows:
         view = _view_of(row)
-        if view.covers(target):
+        if view.covers(target, subject_kind):
             return view
     return None
 
 
 def _self_authorize(
-    engine: sa.Engine, target: str, who: str, days: int
+    engine: sa.Engine, target: str, who: str, days: int, subject_kind: str
 ) -> tuple[EngagementView, str]:
     """Record a scoped operator engagement for a target with no prior one.
 
-    The authority is prospect_company (domain) or public_research (email) —
-    never client_engagement — so this grants only the passive research an
-    operator is entitled to run on their own say-so. Tier C and active
-    techniques remain gated. The engagement is persisted and attributed, so
-    the self-authorization is itself on the record.
+    The authority is prospect_company (domain) or public_research (email or
+    username) — never client_engagement — so this grants only the passive
+    research an operator is entitled to run on their own say-so. Tier C and
+    active techniques remain gated (so the account-enumeration tools, which
+    need a client engagement, are not reachable this way). The engagement is
+    persisted and attributed, so the self-authorization is itself on record.
     """
     from neesha.resolve.intake import resolve_seed
 
-    seed = resolve_seed(target, "auto")
+    seed = resolve_seed(target, subject_kind if subject_kind != "domain" else "auto")
+    domains = emails = usernames = ()
     if seed["kind"] == "email":
-        authority, domains, emails, subject = "public_research", (), (seed["normalized"],), seed["normalized"]
+        authority, emails, subject = "public_research", (seed["normalized"],), seed["normalized"]
+    elif seed["kind"] == "username":
+        authority, usernames, subject = "public_research", (seed["normalized"],), seed["normalized"]
     elif seed["kind"] in ("domain", "website") and seed.get("domain"):
-        authority, domains, emails, subject = "prospect_company", (seed["domain"],), (), seed["domain"]
+        authority, domains, subject = "prospect_company", (seed["domain"],), seed["domain"]
     else:
-        raise ValueError(f"{target!r} is not a domain or exact email; create an engagement explicitly.")
+        raise ValueError(f"{target!r} is not a domain, exact email, or username; create an engagement explicitly.")
 
     now = _now()
     engagement_id = uuid4().hex
@@ -428,6 +466,7 @@ def _self_authorize(
                 authority_basis=authority,
                 authorized_domains=list(domains),
                 authorized_emails=list(emails),
+                authorized_usernames=list(usernames),
                 permitted_techniques=[],
                 authorized_by=f"operator-self-authorized:{who}",
                 starts_at=now,
@@ -442,6 +481,7 @@ def _self_authorize(
             permitted_techniques=frozenset(),
             authorized_domains=domains,
             authorized_emails=emails,
+            authorized_usernames=usernames,
             starts_at=now,
             expires_at=now + timedelta(days=days),
         ),

@@ -94,18 +94,23 @@ def execute_run(
     )
 
     # Validate direction before creating a run that could be left running.
-    if subject_kind == 'email' and tuple(pir_templates) == ('attack-surface',):
-        pir_templates = ('email-public-presence',)
+    _DEFAULT_PIR = {'email': 'email-public-presence', 'username': 'username-account-presence'}
+    if subject_kind in _DEFAULT_PIR and tuple(pir_templates) == ('attack-surface',):
+        pir_templates = (_DEFAULT_PIR[subject_kind],)
     pirs = expand_templates(pir_templates)
-    if subject_kind not in ('domain', 'company', 'email'):
-        raise ValueError('Only domain/company and exact-email runs are connected.')
-    if subject_kind == 'email':
+    if subject_kind not in ('domain', 'company', 'email', 'username'):
+        raise ValueError('Only domain/company, exact-email, and username runs are connected.')
+    if subject_kind in ('email', 'username'):
         from neesha.resolve.intake import resolve_seed
-        company = resolve_seed(company, 'email')['normalized']
+        company = resolve_seed(company, subject_kind)['normalized']
     plan = build_plan(pirs, company, entity_kind=subject_kind, tiers=tiers, sources=sources)
 
-    company_id = (Repository.ensure_email(engine, company) if subject_kind == 'email'
-                  else Repository.ensure_company(engine, company))
+    if subject_kind == 'email':
+        company_id = Repository.ensure_email(engine, company)
+    elif subject_kind == 'username':
+        company_id = Repository.ensure_username(engine, company)
+    else:
+        company_id = Repository.ensure_company(engine, company)
     run_id = uuid4().hex
     started = _now()
     monotonic_start = time.monotonic()

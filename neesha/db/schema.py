@@ -40,7 +40,7 @@ def _money(name: str, **kw) -> sa.Column:
 
 # Vocabularies. Kept here so the CHECK constraints and the application agree
 # on one definition rather than drifting apart.
-ENTITY_KINDS = ("company", "domain", "host", "service", "person", "vendor", "email")
+ENTITY_KINDS = ("company", "domain", "host", "service", "person", "vendor", "email", "username")
 CONFIDENCES = ("high", "medium", "low", "unknown")
 SENSITIVITIES = ("business", "personal", "restricted")
 COLLECTION_MODES = ("third_party_passive", "direct_contact", "active")
@@ -99,6 +99,7 @@ engagement = sa.Table(
     sa.Column("permitted_techniques", _json(), nullable=False, server_default="[]"),
     sa.Column("authorized_domains", _json(), nullable=False, server_default="[]"),
     sa.Column("authorized_emails", _json(), nullable=False, server_default="[]"),
+    sa.Column("authorized_usernames", _json(), nullable=False, server_default="[]"),
     sa.Column("authorized_by", sa.Text, nullable=False),
     sa.Column("document_ref", sa.Text),
     _ts("starts_at", nullable=False),
@@ -180,7 +181,7 @@ entity = sa.Table(
     # Company-linked kinds retain their research context. An exact email root
     # may stand alone without manufacturing a company or a named person.
     sa.CheckConstraint(
-        "kind IN ('company', 'email') OR company_id IS NOT NULL",
+        "kind IN ('company', 'email', 'username') OR company_id IS NOT NULL",
         name="ck_entity_company_first",
     ),
     sa.UniqueConstraint(
