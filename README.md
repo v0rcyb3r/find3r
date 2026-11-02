@@ -296,12 +296,24 @@ investigation without a company association. Two keyless source adapters are ena
   issued. Without an existing `EMAILREP_API_KEY`, this source is unavailable.
 
 These are native source adapters, not claims that external CLI tools were installed.
+The two keyless adapters were live-checked with a reserved example.com address and
+correctly returned no public matches. Positive matching and Gmail routing are
+covered with fixture-based tests.
+
 [Holehe](https://github.com/megadose/holehe) and
-[Socialscan](https://github.com/iojw/socialscan) were reviewed but use signup or
-recovery endpoints; they are not part of passive collection. Registration coverage
-is explicitly distinguished from public appearances. The two keyless adapters were
-live-checked with a reserved example.com address and correctly returned no public
-matches. Positive matching and Gmail routing are covered with fixture-based tests.
+[Socialscan](https://github.com/iojw/socialscan) are integrated as **Tier C,
+client-engagement-gated** account-enumeration runners. They check an exact email
+against third-party sign-up/recovery endpoints, so, like the IntelX aggregate
+connector, they run only under a `client_engagement` whose scope authorizes the
+exact subject and lists the `account_enumeration` technique, with per-step analyst
+approval — operator self-authorization never reaches them, and they are off by
+default. Only the per-service existence of an account and a count are kept: the
+tools' recovery-email and phone hints are discarded before anything is cached,
+stored, or exported. Registration coverage (an account exists) is explicitly
+distinguished from a public appearance, and is never proof of identity, ownership,
+or current control of the account. The runners are hardened like Subfinder
+(stripped environment, no shell, bounded output and time) and report unavailable
+until the binary is installed; their parsing is fixture-tested.
 
 Each recent investigation and detail view has **Delete investigation**. It removes
 that run's facts, source payloads, query records, matching cache envelopes, and exact

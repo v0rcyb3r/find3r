@@ -25,6 +25,8 @@ from neesha.adapters.dehashed import DeHashedAdapter
 from neesha.adapters.github_email import GitHubEmailAdapter
 from neesha.adapters.gravatar import GravatarAdapter
 from neesha.adapters.emailrep import EmailRepAdapter
+from neesha.adapters.holehe import HoleheAdapter
+from neesha.adapters.socialscan import SocialscanAdapter
 
 _REGISTERED: tuple[Type[BaseAdapter], ...] = (
     CrtShAdapter,
@@ -40,6 +42,8 @@ _REGISTERED: tuple[Type[BaseAdapter], ...] = (
     GitHubEmailAdapter,
     GravatarAdapter,
     EmailRepAdapter,
+    HoleheAdapter,
+    SocialscanAdapter,
 )
 
 ADAPTERS: dict[str, Type[BaseAdapter]] = {cls.name: cls for cls in _REGISTERED}

@@ -29,6 +29,10 @@ PIR_TEMPLATES: dict[str, list[tuple[str, frozenset[str]]]] = {
         ("Which public Gravatar profile observations match the email hash?", frozenset({"public.profile.gravatar"})),
         ("Which public email reputation observations are available?", frozenset({"public.email.emailrep"})),
     ],
+    "email-account-presence": [
+        ("On which services does an account exist for this exact email?",
+         frozenset({"public.account"})),
+    ],
     "company-contacts": [
         ("Which business emails and phone numbers does the company publish?",
          frozenset({"company.business_email", "company.business_phone"})),

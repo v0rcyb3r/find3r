@@ -52,13 +52,22 @@ def build_graph(company: str, facts: list[dict], subject_kind: str = "company") 
             # account registration. Never create a person/company from a label.
             if not attr.startswith('public.'):
                 continue
-            if attr.endswith('.url') or attr.endswith('_url'):
+            if attr == 'public.account.found' or attr.startswith('public.account.found'):
+                # An enumerated account existence: show it as an account tied to
+                # the exact email, labelled by the service. Evidence-backed only.
+                account = node('account', str(fact.get('source', '')) + ':' + value, value)
+                link(seed, account, 'account_observed', fact)
+            elif attr.startswith('public.account.summary'):
+                continue  # a count, not an entity to draw
+            elif attr.endswith('.url') or attr.endswith('_url'):
                 observation = node('url', value, value)
+                link(seed, observation, 'public_provider_metadata', fact)
             elif attr.endswith('linked_login'):
-                observation = node('account', str(fact.get('source', '')) + ':' + value, value)
+                account = node('account', str(fact.get('source', '')) + ':' + value, value)
+                link(seed, account, 'public_provider_metadata', fact)
             else:
                 observation = node('observation', attr + ':' + value, attr + ' = ' + value)
-            link(seed, observation, 'public_provider_metadata', fact)
+                link(seed, observation, 'public_provider_metadata', fact)
             continue
         person=None
         if attr.startswith('person.'):
