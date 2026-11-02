@@ -52,3 +52,9 @@ def pg_engine():
     yield eng
     schema.metadata.drop_all(eng)
     eng.dispose()
+
+
+@pytest.fixture(autouse=True)
+def configured_hunter_test_cost(monkeypatch):
+    # Tests use an explicit fixture price, never an assumed live provider rate.
+    monkeypatch.setenv('HUNTER_ESTIMATED_USD_PER_SEARCH', '0.01')

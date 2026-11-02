@@ -6,9 +6,9 @@ records and facts. Reads during analysis are queries, not object graphs.
 
 Two rules are enforced here rather than left to callers:
 
-- Every non-company entity is attached to a company. The schema has the
-  CHECK; this makes it impossible to reach by accident, because the company
-  id is a constructor argument rather than a per-call option.
+- Company investigations scope linked entities to the company root. Exact
+  email roots may stand alone and accept only same-email observations; they
+  never manufacture a company or named person from provider metadata.
 - Facts are graded by the guardrail tables, never by the adapter that
   produced them. A collector must not be able to certify its own output.
 """
@@ -50,10 +50,11 @@ class WrittenFact:
 
 
 class Repository:
-    def __init__(self, engine: sa.Engine, company_id: str, run_id: str):
+    def __init__(self, engine: sa.Engine, company_id: str, run_id: str, subject_kind: str = "company"):
         self.engine = engine
         self.company_id = company_id
         self.run_id = run_id
+        self.subject_kind = subject_kind
 
     # ---- entities --------------------------------------------------------
 
@@ -87,13 +88,48 @@ class Repository:
             )
             return new_id
 
-    def ensure_entity(self, conn, kind: str, name: str) -> str:
-        """Find or create an entity, always under this run's company.
+    @classmethod
+    def ensure_email(cls, engine: sa.Engine, address: str) -> str:
+        """An exact email can be a root; its provider is never a company entity."""
+        from neesha.resolve.intake import resolve_seed
+        canonical = resolve_seed(address, 'email')['normalized']
+        with engine.begin() as conn:
+            existing = conn.execute(sa.select(schema.entity.c.id).where(
+                schema.entity.c.kind == 'email', schema.entity.c.canonical_name == canonical,
+                schema.entity.c.company_id.is_(None),
+            )).scalar()
+            if existing:
+                return existing
+            identity = _id()
+            now = _now()
+            conn.execute(schema.entity.insert().values(
+                id=identity, kind='email', canonical_name=canonical, company_id=None,
+                aliases=[canonical], confidence='high', resolved_by='exact-email-seed',
+                first_seen_at=now, last_seen_at=now,
+            ))
+            return identity
+
+    def ensure_entity(self, conn, kind: str, name: str, identity_key: Optional[str] = None) -> str:
+        """Find or create an entity inside this run's explicit research context.
 
         ``last_seen_at`` is bumped on every sighting, which is what lets a
         later run tell a still-present asset from a disappeared one.
         """
         canonical = name.strip().lower().rstrip(".")
+        # Names are display labels, not person identifiers. Anonymous drafts
+        # stay separate; only an explicit stable identifier can reuse a person.
+        if kind == "person":
+            canonical = identity_key or ("unresolved-observation:" + _id())
+        if self.subject_kind == 'email':
+            if kind != 'email':
+                raise ValueError('Email-root observations cannot manufacture company or person entities.')
+            from neesha.resolve.intake import resolve_seed
+            canonical = resolve_seed(name, 'email')['normalized']
+            root_name = conn.execute(sa.select(schema.entity.c.canonical_name).where(
+                schema.entity.c.id == self.company_id)).scalar_one()
+            if canonical != root_name:
+                raise ValueError('Email-root observations must concern the exact seed email.')
+            return self.company_id
         if kind == "company":
             return self.company_id
 
@@ -121,7 +157,8 @@ class Repository:
                 canonical_name=canonical,
                 company_id=self.company_id,
                 confidence="medium",
-                resolved_by="adapter",
+                resolved_by="explicit-identifier" if kind == "person" and identity_key else "adapter",
+                aliases=[name.strip()] if kind == "person" else [],
                 first_seen_at=now,
                 last_seen_at=now,
             )
@@ -191,11 +228,11 @@ class Repository:
         with self.engine.begin() as conn:
             for draft in drafts:
                 entity_id = self.ensure_entity(
-                    conn, draft.entity_kind, draft.entity_name or subject_name
+                    conn, draft.entity_kind, draft.entity_name or subject_name, draft.identity_key
                 )
 
                 corroborated = self._has_independent_support(
-                    conn, draft.attribute, draft.value, source_record_id
+                    conn, entity_id, draft.attribute, draft.value, source_record_id
                 )
                 claim_grade = grade_claim(
                     source_type,
@@ -208,29 +245,39 @@ class Repository:
 
                 fact_id = _id()
                 try:
-                    conn.execute(
-                        schema.fact.insert().values(
-                            id=fact_id,
-                            entity_id=entity_id,
-                            attribute=draft.attribute,
-                            value=draft.value,
-                            value_type=draft.value_type,
-                            unit=draft.unit,
-                            observed_at=now,
-                            run_id=self.run_id,
-                            source_record_id=source_record_id,
-                            confidence=confidence,
-                            is_inference=draft.is_inference,
-                            admiralty_source=source_grade.value,
-                            admiralty_claim=str(claim_grade),
-                            sensitivity=draft.sensitivity,
-                            retention_expires_at=expires,
+                    # A duplicate must not abort the enclosing Postgres transaction.
+                    with conn.begin_nested():
+                        conn.execute(
+                            schema.fact.insert().values(
+                                id=fact_id,
+                                entity_id=entity_id,
+                                attribute=draft.attribute,
+                                value=draft.value,
+                                value_type=draft.value_type,
+                                unit=draft.unit,
+                                observed_at=now,
+                                run_id=self.run_id,
+                                source_record_id=source_record_id,
+                                confidence=confidence,
+                                is_inference=draft.is_inference,
+                                admiralty_source=source_grade.value,
+                                admiralty_claim=str(claim_grade),
+                                sensitivity=draft.sensitivity,
+                                retention_expires_at=expires,
+                            )
                         )
-                    )
                 except sa.exc.IntegrityError:
-                    # This source already asserted this exact fact. Not an
-                    # error: adapters legitimately repeat themselves across
-                    # paginated results.
+                    # Suppress only an exact duplicate, never a broken constraint.
+                    duplicate = conn.execute(
+                        sa.select(schema.fact.c.id).where(
+                            schema.fact.c.entity_id == entity_id,
+                            schema.fact.c.attribute == draft.attribute,
+                            schema.fact.c.value == draft.value,
+                            schema.fact.c.source_record_id == source_record_id,
+                        )
+                    ).scalar()
+                    if duplicate is None:
+                        raise
                     continue
 
                 written.append(
@@ -248,7 +295,7 @@ class Repository:
 
     @staticmethod
     def _has_independent_support(
-        conn, attribute: str, value: str, source_record_id: str
+        conn, entity_id: str, attribute: str, value: str, source_record_id: str
     ) -> bool:
         """True if a different origin already asserts this attribute+value.
 
@@ -270,6 +317,9 @@ class Repository:
                 )
             )
             .where(
+                schema.fact.c.entity_id == entity_id,
+                schema.fact.c.retention_expires_at > _now(),
+                schema.fact.c.is_inference.is_(False),
                 schema.fact.c.attribute == attribute,
                 schema.fact.c.value == value,
                 schema.source_record.c.origin_url.is_not(None),

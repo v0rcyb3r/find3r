@@ -14,10 +14,32 @@ from typing import Any, Iterable, Optional, Type
 from neesha.adapters.base import BaseAdapter
 from neesha.adapters.crtsh import CrtShAdapter
 from neesha.adapters.hunter import HunterAdapter
+from neesha.adapters.company_web import CompanyWebAdapter
+from neesha.adapters.dns_posture import DnsPostureAdapter
+from neesha.adapters.otx import OtxAdapter
+from neesha.adapters.wayback import WaybackAdapter
+from neesha.adapters.urlscan import UrlscanAdapter
+from neesha.adapters.subfinder import SubfinderAdapter
+from neesha.adapters.intelx import IntelXAdapter
+from neesha.adapters.dehashed import DeHashedAdapter
+from neesha.adapters.github_email import GitHubEmailAdapter
+from neesha.adapters.gravatar import GravatarAdapter
+from neesha.adapters.emailrep import EmailRepAdapter
 
 _REGISTERED: tuple[Type[BaseAdapter], ...] = (
     CrtShAdapter,
     HunterAdapter,
+    CompanyWebAdapter,
+    DnsPostureAdapter,
+    OtxAdapter,
+    WaybackAdapter,
+    UrlscanAdapter,
+    SubfinderAdapter,
+    IntelXAdapter,
+    DeHashedAdapter,
+    GitHubEmailAdapter,
+    GravatarAdapter,
+    EmailRepAdapter,
 )
 
 ADAPTERS: dict[str, Type[BaseAdapter]] = {cls.name: cls for cls in _REGISTERED}
@@ -39,7 +61,7 @@ def build(name: str, **kwargs) -> Any:
 
 
 def for_attributes(
-    attributes: Iterable[str], tiers: Optional[set[str]] = None
+    attributes: Iterable[str], tiers: Optional[set[str]] = None, sources: Optional[set[str]] = None
 ) -> list[Type[BaseAdapter]]:
     """Adapters that can produce any of these attributes, cheapest first."""
     wanted = frozenset(attributes)
@@ -47,11 +69,12 @@ def for_attributes(
         cls
         for cls in ADAPTERS.values()
         if cls.can_answer(wanted) and (tiers is None or cls.tier in tiers)
+        and (cls.name in sources if sources is not None else cls.default_enabled)
     ]
     return sorted(matches, key=lambda c: (TIER_ORDER.get(c.tier, 9), c.name))
 
 
-def produced_attributes(tiers: Optional[set[str]] = None) -> frozenset[str]:
+def produced_attributes(tiers: Optional[set[str]] = None, sources: Optional[set[str]] = None) -> frozenset[str]:
     """Everything the registry can currently produce.
 
     The planner subtracts a PIR's needs from this to report honestly on what
@@ -59,6 +82,39 @@ def produced_attributes(tiers: Optional[set[str]] = None) -> frozenset[str]:
     """
     out: set[str] = set()
     for cls in ADAPTERS.values():
-        if tiers is None or cls.tier in tiers:
+        if (tiers is None or cls.tier in tiers) and (cls.name in sources if sources is not None else cls.default_enabled):
             out |= set(cls.produces)
     return frozenset(out)
+
+
+def catalog() -> list[dict]:
+    """Configured capabilities, not a claim that external providers are healthy."""
+    import os
+    import shutil
+
+    rows = []
+    for cls in ADAPTERS.values():
+        ready, reason = True, 'Available; provider availability and rate limits can vary.'
+        if cls.name == 'hunter' and not os.environ.get('HUNTER_API_KEY'):
+            ready, reason = False, 'Needs Hunter credentials and a configured budget.'
+        if hasattr(cls, 'availability'):
+            availability = cls().availability()
+            ready, reason = availability['available'], availability['reason']
+        rows.append({'name': cls.name, 'description': cls.description,
+                     'accepts': sorted(cls.accepts),
+                     'tier': cls.tier, 'mode': cls.collection_mode, 'ready': ready,
+                     'state': 'available' if ready else 'not configured', 'reason': reason,
+                     'integrated': bool(cls.produces)})
+    for name, binary, reason in (
+        ('theHarvester', 'theHarvester', 'Installed tool needs an isolated runner before integration; defaults write outside NEESHA.'),
+        ('Amass', 'amass', 'Installed binary needs compatibility and passive-mode validation.'),
+        ('SpiderFoot', 'spiderfoot', 'Requires a curated module runner; not integrated.'),
+        ('BBOT', 'bbot', 'Requires a curated passive module runner; not integrated.'),
+        ('Recon-ng', 'recon-ng', 'Module-level integration is not implemented.'),
+    ):
+        installed = shutil.which(binary) is not None
+        rows.append({'name': name, 'description': reason, 'tier': 'A',
+                     'mode': 'module-dependent', 'ready': False, 'integrated': False,
+                     'state': 'installed · not connected' if installed else 'not installed',
+                     'reason': reason})
+    return rows

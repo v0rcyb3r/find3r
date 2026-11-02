@@ -10,9 +10,8 @@ Design notes worth keeping in view while reading:
 
 - ``fact`` is the substrate. A claim is a rendered view of facts, never the
   stored form, because prose cannot be corroborated, diffed, or redacted.
-- ``entity.company_id`` is required for every non-company kind, enforced by a
-  CHECK. Company-first is therefore structural: a person with no company is
-  unrepresentable rather than merely discouraged.
+- ``entity.company_id`` scopes company-linked observations; exact email roots
+  may stand alone for public research without inventing an organization.
 - Enumerations are TEXT plus a CHECK rather than native enums, so adding a
   value is an ordinary migration instead of a type rewrite.
 
@@ -41,11 +40,11 @@ def _money(name: str, **kw) -> sa.Column:
 
 # Vocabularies. Kept here so the CHECK constraints and the application agree
 # on one definition rather than drifting apart.
-ENTITY_KINDS = ("company", "domain", "host", "service", "person", "vendor")
+ENTITY_KINDS = ("company", "domain", "host", "service", "person", "vendor", "email")
 CONFIDENCES = ("high", "medium", "low", "unknown")
 SENSITIVITIES = ("business", "personal", "restricted")
 COLLECTION_MODES = ("third_party_passive", "direct_contact", "active")
-AUTHORITY_BASES = ("own_org", "prospect_company", "client_engagement")
+AUTHORITY_BASES = ("own_org", "prospect_company", "client_engagement", "public_research")
 TIERS = ("A", "B", "C", "D")
 SEVERITIES = ("critical", "high", "medium", "low")
 RUN_STATUSES = (
@@ -99,6 +98,7 @@ engagement = sa.Table(
     # against this; it is the mechanism that keeps Tier C off prospects.
     sa.Column("permitted_techniques", _json(), nullable=False, server_default="[]"),
     sa.Column("authorized_domains", _json(), nullable=False, server_default="[]"),
+    sa.Column("authorized_emails", _json(), nullable=False, server_default="[]"),
     sa.Column("authorized_by", sa.Text, nullable=False),
     sa.Column("document_ref", sa.Text),
     _ts("starts_at", nullable=False),
@@ -177,11 +177,10 @@ entity = sa.Table(
     _ts("last_seen_at", nullable=False),
     _in("kind", ENTITY_KINDS, "ck_entity_kind"),
     _in("confidence", CONFIDENCES, "ck_entity_confidence"),
-    # Company-first, enforced rather than requested: everything that is not
-    # itself a company must hang off one, so an individual cannot exist in
-    # this database as a free-standing subject.
+    # Company-linked kinds retain their research context. An exact email root
+    # may stand alone without manufacturing a company or a named person.
     sa.CheckConstraint(
-        "kind = 'company' OR company_id IS NOT NULL",
+        "kind IN ('company', 'email') OR company_id IS NOT NULL",
         name="ck_entity_company_first",
     ),
     sa.UniqueConstraint(

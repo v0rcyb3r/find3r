@@ -173,9 +173,9 @@ def test_hunter_never_puts_the_key_in_provenance(no_network, monkeypatch):
     reference = adapter.search(request)[0]
     raw = adapter.fetch(reference)
 
-    assert "sk-SUPERSECRET-123" in reference.url, "the live call needs the key"
+    assert "sk-SUPERSECRET-123" not in reference.url, "credentials belong in headers"
     assert "SUPERSECRET" not in raw.request_url, "what we store must not have it"
-    assert "api_key=REDACTED" in raw.request_url
+    assert "api_key" not in raw.request_url
 
 
 def test_hunter_scrubs_the_key_from_error_text(monkeypatch):
@@ -540,3 +540,172 @@ def test_purge_leaves_live_data_alone(engine, gate, ledger, engagement, no_netwo
     ex.execute(CrtShAdapter(), Request("domain", "acme.com"))
     counts = repo.purge_expired(now=NOW)
     assert counts["fact"] == 0
+
+
+def test_corroboration_requires_same_entity_and_live_observation(
+    engine, gate, ledger, engagement
+):
+    from neesha.adapters.base import FactDraft, RawResult
+
+    _, repo = executor_for(engine, gate, ledger, engagement)
+
+    def record(origin, name, inference=False):
+        source = repo.write_source_record(
+            adapter='fixture', tier='A', collection_mode='third_party_passive',
+            raw=RawResult(payload=b'{}', request_url=origin),
+            retention=timedelta(days=30),
+        )
+        return repo.write_facts(
+            [FactDraft(attribute='person.role', value='CTO', entity_kind='person',
+                       entity_name=name, is_inference=inference, identity_key='fixture-person:'+name)],
+            source_record_id=source, source_type='osint', subject_name='acme.com',
+            retention=timedelta(days=30),
+        )[0]
+
+    first = record('https://first.example/', 'Alice')
+    assert first.confidence == 'medium'
+    unrelated = record('https://second.example/', 'Bob')
+    assert unrelated.confidence == 'medium'
+    with engine.begin() as conn:
+        conn.execute(schema.fact.update().values(
+            retention_expires_at=NOW - timedelta(days=1)))
+    expired_support = record('https://third.example/', 'Alice')
+    assert expired_support.confidence == 'medium'
+    record('https://inferred.example/', 'Carol', inference=True)
+    assert record('https://observed.example/', 'Carol').confidence == 'medium'
+    assert record('https://fourth.example/', 'Alice').confidence == 'high'
+
+
+def test_pir_evidence_links_only_current_run_and_exact_namespace(
+    engine, gate, ledger, engagement
+):
+    from neesha.adapters.base import FactDraft, RawResult
+    from neesha.harness.run import _fact_ids_for
+
+    _, repo = executor_for(engine, gate, ledger, engagement)
+    source = repo.write_source_record(
+        adapter='fixture', tier='A', collection_mode='third_party_passive',
+        raw=RawResult(payload=b'{}', request_url='https://example.test/'),
+        retention=timedelta(days=30),
+    )
+    facts = repo.write_facts(
+        [FactDraft(attribute='person.role', value='CTO'),
+         FactDraft(attribute='person.roles_other', value='unrelated')],
+        source_record_id=source, source_type='osint', subject_name='acme.com',
+        retention=timedelta(days=30),
+    )
+    assert _fact_ids_for(engine, repo.company_id, repo.run_id,
+                         frozenset({'person.role'})) == [facts[0].id]
+    assert _fact_ids_for(engine, repo.company_id, 'another-run',
+                         frozenset({'person.role'})) == []
+
+
+def test_invalid_pir_does_not_leave_a_running_record(
+    engine, ledger, gate, seeded_engagement
+):
+    with pytest.raises(KeyError, match='unknown PIR'):
+        execute_run(engine=engine, ledger=ledger, gate=gate, company='acme.com',
+                    engagement=seeded_engagement, analyst='a',
+                    pir_templates=('typo',))
+    with engine.connect() as conn:
+        assert conn.execute(sa.select(sa.func.count()).select_from(schema.run)).scalar() == 0
+
+
+def test_repeated_fact_does_not_discard_other_facts(
+    engine, gate, ledger, engagement
+):
+    from neesha.adapters.base import FactDraft, RawResult
+
+    _, repo = executor_for(engine, gate, ledger, engagement)
+    source = repo.write_source_record(
+        adapter='fixture', tier='A', collection_mode='third_party_passive',
+        raw=RawResult(payload=b'{}', request_url='https://example.test/'),
+        retention=timedelta(days=30),
+    )
+    first = FactDraft(attribute='dns.subdomain', value='mail.acme.com')
+    written = repo.write_facts(
+        [first, first, FactDraft(attribute='dns.subdomain', value='vpn.acme.com')],
+        source_record_id=source, source_type='osint', subject_name='acme.com',
+        retention=timedelta(days=30),
+    )
+    assert {f.value for f in written} == {'mail.acme.com', 'vpn.acme.com'}
+
+
+def test_brief_contains_guarded_claims_and_original_provenance(
+    engine, ledger, gate, seeded_engagement, no_network, tmp_path
+):
+    from neesha.harness.brief import build_brief, write_brief
+
+    report = execute_run(
+        engine=engine, ledger=ledger, gate=gate, company='acme.com',
+        engagement=seeded_engagement, analyst='a',
+        pir_templates=('attack-surface', 'email-security-fit'), caps=CAPS,
+    )
+    brief = build_brief(engine, report.run_id)
+    assert brief['facts']
+    assert not brief['inferences']
+    for fact in brief['facts']:
+        assert fact['admiralty'] == 'C3'
+        assert fact['confidence'] == 'medium'
+        assert fact['source_record_id']
+        assert fact['collected_at']
+        assert fact['collection_mode'] == 'third_party_passive'
+        assert 'single-source' in fact['flags']
+    md_path, json_path = write_brief(engine, report.run_id, tmp_path)
+    assert 'What we could not answer' in md_path.read_text()
+    assert json.loads(json_path.read_text()) == brief
+    assert 'raw_payload' not in json_path.read_text()
+
+
+def test_brief_withholds_restricted_and_expired_facts_and_reopens_gaps(
+    engine, ledger, gate, seeded_engagement, no_network
+):
+    from neesha.harness.brief import build_brief
+
+    report = execute_run(
+        engine=engine, ledger=ledger, gate=gate, company='acme.com',
+        engagement=seeded_engagement, analyst='a', caps=CAPS,
+    )
+    with engine.begin() as conn:
+        conn.execute(schema.fact.update().where(
+            schema.fact.c.attribute == 'dns.subdomain'
+        ).values(sensitivity='restricted'))
+        conn.execute(schema.fact.update().where(
+            schema.fact.c.attribute == 'tls.ct.issuer'
+        ).values(retention_expires_at=NOW - timedelta(days=1)))
+    brief = build_brief(engine, report.run_id)
+    assert brief['facts'] == []
+    assert all(pir['status'] == 'unanswerable' for pir in brief['requirements'])
+    assert all(not pir['fact_ids'] for pir in brief['requirements'])
+
+
+def test_harness_cli_writes_both_briefing_formats(
+    engine, seeded_engagement, no_network, monkeypatch, tmp_path
+):
+    from typer.testing import CliRunner
+    from neesha.cli.harness_cli import harness_app
+
+    monkeypatch.setenv('NEESHA_DATABASE_URL', str(engine.url))
+    output = tmp_path / 'briefs'
+    result = CliRunner().invoke(harness_app, [
+        'run', 'acme.com', '--engagement', seeded_engagement.id,
+        '--out', str(output),
+    ])
+    assert result.exit_code == 0, result.output
+    (json_path,) = output.glob('*.json')
+    (md_path,) = output.glob('*.md')
+    assert json.loads(json_path.read_text())['facts']
+    assert 'What we know' in md_path.read_text()
+
+
+def test_requirement_cannot_be_answered_by_a_less_specific_attribute(engine):
+    from neesha.harness.executor import StepResult
+    from neesha.harness.plan import PIR, Plan
+    from neesha.harness.run import _resolve_pirs
+
+    requirement = PIR('Is DMARC enforced?', frozenset({'email.dmarc.policy'}))
+    plan = Plan(pirs=[requirement])
+    _resolve_pirs(engine, plan, 'company', 'run', [
+        StepResult('fixture', 'collected', attributes=['email.dmarc'])
+    ])
+    assert requirement.status == 'unanswerable'

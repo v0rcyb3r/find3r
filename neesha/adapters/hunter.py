@@ -1,25 +1,21 @@
-"""Hunter.io — business email discovery. Tier B, metered.
+"""Hunter business-email search with bounded, result-priced collection.
 
-Two things about this adapter carry more weight than the parsing:
+The current official API supports X-API-KEY authentication. Keys therefore
+never appear in request URLs or provenance. Domain Search charges depend on
+returned emails; the operator must configure a conservative per-search USD
+estimate covering the configured result cap. No fixed provider price is assumed.
 
-**The key never enters provenance.** The request URL and the recorded URL are
-deliberately different objects. Hunter takes its key as a query parameter, so
-the credentialed URL exists, but what reaches ``source_record.request_url``
-and therefore any exported report is the redacted form. This is the leak
-AUDIT.md P1 documented, closed at the point where it originated.
-
-**Everything here is business-contact data.** Hunter returns a person's work
-email, department and seniority — facts about a role at a company, which is
-what the People & Org tab is for. The adapter never emits a personal address,
-and it attaches every person to the company rather than standing them up as
-an independent subject. Under Hunter's terms we are an independent GDPR
-controller for what we retrieve, which is why retention here is short and the
-purge job is a compliance control.
+Only addresses matching the requested company domain become person facts.
+Professional-role facts retain the stable email identity key.
 """
 from __future__ import annotations
 
 import json
 import os
+import re
+import urllib.request
+from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 import urllib.parse
 from typing import ClassVar, Optional
 
@@ -32,15 +28,40 @@ from neesha.adapters.base import (
     Reference,
     Request,
 )
-from neesha.collectors.network import http_get, redact_url
+from neesha.collectors.network import _default_context
 
 API_KEY_ENV = "HUNTER_API_KEY"
 
-# Cost per domain-search request. Hunter's paid plans bill per request; the
-# free tier allows a small monthly allowance. This figure is the ledger's
-# estimate and is settled with the actual afterwards — confirm the current
-# rate against your plan rather than trusting this constant.
-ESTIMATED_USD_PER_SEARCH = 0.01
+PRICE_ENV = 'HUNTER_ESTIMATED_USD_PER_SEARCH'
+MAX_PAYLOAD_BYTES = 2 * 1024 * 1024
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        return None
+
+
+def http_get(url: str, headers=None, timeout=30) -> str:
+    """Bound response size and refuse credential-forwarding redirects."""
+    opener = urllib.request.build_opener(
+        _NoRedirect(), urllib.request.HTTPSHandler(context=_default_context()))
+    request = urllib.request.Request(url, headers={'User-Agent': 'NEESHA/0.1', **(headers or {})})
+    with opener.open(request, timeout=timeout) as response:
+        payload = response.read(MAX_PAYLOAD_BYTES + 1)
+    if len(payload) > MAX_PAYLOAD_BYTES:
+        raise AdapterError('Hunter response exceeds the collection size limit')
+    return payload.decode('utf-8', errors='replace')
+
+
+def _domain(value: str) -> str:
+    domain = value.strip().lower().rstrip('.')
+    if len(domain) > 253 or len(domain.split('.')) < 2 or any(
+        not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', label)
+        for label in domain.split('.')
+    ):
+        raise AdapterError('Hunter requires a valid company domain')
+    return domain
+
 
 # Short on purpose: personal data we control, so we keep it only as long as a
 # briefing cycle needs it.
@@ -59,15 +80,41 @@ class HunterAdapter(BaseAdapter):
     accepts: ClassVar[frozenset[str]] = frozenset({"company", "domain"})
     retention_days: ClassVar[int] = RETENTION_DAYS
 
-    max_people: ClassVar[int] = 100
+    max_people: ClassVar[int] = 10
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, *, max_people: int = 10):
+        if type(max_people) is not int or not 1 <= max_people <= 100:
+            raise AdapterError('Hunter result cap must be between 1 and 100')
         self._api_key = api_key
+        self.max_people = max_people
 
     # ---- cost ------------------------------------------------------------
 
     def estimate_cost(self, request: Request) -> Cost:
-        return Cost(usd=ESTIMATED_USD_PER_SEARCH, basis="per_call")
+        self._limit(request)
+        try:
+            amount = Decimal(os.environ.get(PRICE_ENV, ''))
+        except InvalidOperation:
+            amount = Decimal('NaN')
+        if not amount.is_finite() or not Decimal('0.0001') <= amount <= Decimal('1000000'):
+            raise AdapterError('Configure a positive HUNTER_ESTIMATED_USD_PER_SEARCH covering the result cap before collection')
+        return Cost(usd=float(amount), basis='per_call')
+
+    def _limit(self, request: Request) -> int:
+        value = request.params.get('limit', self.max_people)
+        if isinstance(value, str) and value.isascii() and value.isdigit():
+            value = int(value)
+        if type(value) is not int or not 1 <= value <= self.max_people:
+            raise AdapterError('Hunter request limit exceeds the configured result cap')
+        return value
+
+    def availability(self) -> dict:
+        try:
+            self.api_key()
+            self.estimate_cost(Request('domain', 'example.com'))
+        except AdapterError as exc:
+            return {'available': False, 'reason': str(exc)}
+        return {'available': True, 'reason': 'Configured; business emails only, with budget reservation required.'}
 
     def api_key(self) -> str:
         key = self._api_key or os.environ.get(API_KEY_ENV)
@@ -80,56 +127,89 @@ class HunterAdapter(BaseAdapter):
     # ---- collection ------------------------------------------------------
 
     def search(self, request: Request) -> list[Reference]:
-        domain = request.value.strip().lower().rstrip(".")
-        limit = int(request.params.get("limit", self.max_people))
-        # The credentialed URL and the URL we will record are separate on
-        # purpose. Only the redacted one is allowed to persist.
-        request_url = (
-            "https://api.hunter.io/v2/domain-search"
-            f"?domain={urllib.parse.quote(domain)}"
-            f"&limit={limit}&api_key={self.api_key()}"
-        )
-        return [
-            Reference(
-                url=request_url,
-                origin_url=f"https://hunter.io/domain/{domain}",
-                label=domain,
-            )
-        ]
+        domain = _domain(request.value)
+        self.api_key()
+        self.estimate_cost(request)
+        limit = self._limit(request)
+        query = urllib.parse.urlencode({'domain': domain, 'limit': limit})
+        return [Reference(
+            url='https://api.hunter.io/v2/domain-search?' + query,
+            origin_url=f'https://hunter.io/domain/{domain}', label=domain,
+        )]
 
     def fetch(self, reference: Reference) -> RawResult:
+        parts = urllib.parse.urlsplit(reference.url)
+        params = urllib.parse.parse_qs(parts.query)
+        if (parts.scheme != 'https' or parts.netloc != 'api.hunter.io'
+                or parts.path != '/v2/domain-search' or parts.fragment
+                or set(params) != {'domain', 'limit'}
+                or any(len(values) != 1 for values in params.values())):
+            raise AdapterError('Hunter reference must use the verified domain-search endpoint')
+        domain = _domain(params['domain'][0])
+        request = Request('domain', domain, params={'limit': params['limit'][0]})
+        self.estimate_cost(request)
         try:
-            body = http_get(reference.url, timeout=30)
-        except Exception as exc:  # noqa: BLE001
-            # urllib puts the full request URL into HTTPError messages, so
-            # the exception text has to be scrubbed before it reaches a log.
-            raise AdapterError(
-                f"Hunter fetch failed: {redact_url(str(exc))}"
-            ) from None
+            body = http_get(reference.url, headers={'X-API-KEY': self.api_key()}, timeout=30)
+        except Exception:
+            raise AdapterError('Hunter fetch failed; check credentials, quota, and provider availability') from None
+        payload = body.encode('utf-8', errors='replace')
+        if len(payload) > MAX_PAYLOAD_BYTES:
+            raise AdapterError('Hunter response exceeds the collection size limit')
+        # Only allowlisted business fields enter the evidence store/cache.
+        # Unexpected credential/password fields are discarded in memory.
+        try:
+            response = json.loads(payload)
+            data = response.get('data') if isinstance(response, dict) else None
+            if not isinstance(data, dict) or not isinstance(data.get('domain'), str):
+                raise ValueError()
+            if _domain(data['domain']) != domain:
+                raise ValueError()
+            clean = {'domain': domain}
+            for field in ('pattern', 'webmail', 'disposable'):
+                if type(data.get(field)) in (str, bool):
+                    clean[field] = data[field]
+            records = data.get('emails') or []
+            if not isinstance(records, list):
+                raise ValueError()
+            clean['emails'] = [
+                {field: record[field] for field in (
+                    'value', 'first_name', 'last_name', 'position', 'seniority'
+                ) if isinstance(record.get(field), str)}
+                for record in records[:self._limit(request)]
+                if isinstance(record, dict)
+                and isinstance(record.get('value'), str)
+                and record['value'].strip().lower().endswith('@' + domain)
+            ]
+            payload = json.dumps({'data': clean}).encode()
+        except (ValueError, AdapterError, UnicodeError):
+            raise AdapterError('Hunter returned invalid company-search data') from None
         return RawResult(
-            payload=body.encode("utf-8", errors="replace"),
-            # Redacted here, once, so no downstream caller has to remember.
-            request_url=redact_url(reference.url),
-            origin_url=reference.origin_url,
-            http_status=200,
-            content_type="application/json",
+            payload=payload, request_url=reference.url, origin_url=f'https://hunter.io/domain/{domain}',
+            http_status=200, content_type='application/json', collected_at=datetime.now(timezone.utc),
         )
 
     def parse(self, raw: RawResult, request: Request) -> list[FactDraft]:
-        domain = request.value.strip().lower().rstrip(".")
+        domain = _domain(request.value)
         try:
             body = json.loads(raw.payload.decode("utf-8", errors="replace"))
-        except json.JSONDecodeError as exc:
-            raise AdapterError(f"Hunter returned unparseable JSON: {exc}") from exc
+        except (json.JSONDecodeError, UnicodeError):
+            raise AdapterError('Hunter returned unparseable JSON') from None
 
         data = body.get("data") if isinstance(body, dict) else None
         if not isinstance(data, dict):
             raise AdapterError("Hunter response had no data object")
 
+        if not isinstance(data.get('domain'), str) or _domain(data['domain']) != domain:
+            raise AdapterError('Hunter response domain does not match the requested company')
+        if data.get('webmail') is True or data.get('disposable') is True:
+            return []
+        records = data.get('emails') or []
+        if not isinstance(records, list):
+            raise AdapterError('Hunter response emails must be a list')
         drafts: list[FactDraft] = []
 
         pattern = data.get("pattern")
-        if pattern:
+        if isinstance(pattern, str) and 0 < len(pattern) <= 200:
             # An org-level fact, not a person-level one: the shape of the
             # address, which is often all an analyst needs.
             drafts.append(
@@ -141,15 +221,25 @@ class HunterAdapter(BaseAdapter):
                 )
             )
 
-        for record in (data.get("emails") or [])[: self.max_people]:
+        for record in records[:self._limit(request)]:
             if not isinstance(record, dict):
                 continue
-            address = (record.get("value") or "").strip().lower()
-            if not address or "@" not in address:
+            value = record.get('value')
+            if not isinstance(value, str):
+                continue
+            address = value.strip().lower()
+            if address.count('@') != 1 or len(address) > 254:
+                continue
+            local, email_domain = address.split('@')
+            if (email_domain != domain or not 1 <= len(local) <= 64
+                    or local.startswith('.') or local.endswith('.') or '..' in local
+                    or not re.fullmatch(r"[a-z0-9.!#$%&'*+/=?^_`{|}~-]+", local)):
                 continue
 
-            first = (record.get("first_name") or "").strip()
-            last = (record.get("last_name") or "").strip()
+            first = record.get('first_name')
+            last = record.get('last_name')
+            first = first.strip()[:200] if isinstance(first, str) else ''
+            last = last.strip()[:200] if isinstance(last, str) else ''
             person = " ".join(p for p in (first, last) if p) or address
 
             drafts.append(
@@ -158,25 +248,28 @@ class HunterAdapter(BaseAdapter):
                     value=address,
                     entity_kind="person",
                     entity_name=person,
+                    identity_key="email:" + address,
                     value_type="email",
                 )
             )
-            if record.get("position"):
+            if isinstance(record.get('position'), str) and record['position'].strip():
                 drafts.append(
                     FactDraft(
                         attribute="person.role",
-                        value=str(record["position"]).strip(),
+                        value=record["position"].strip()[:300],
                         entity_kind="person",
                         entity_name=person,
+                        identity_key="email:" + address,
                     )
                 )
-            if record.get("seniority"):
+            if isinstance(record.get('seniority'), str) and record['seniority'].strip():
                 drafts.append(
                     FactDraft(
                         attribute="person.seniority",
-                        value=str(record["seniority"]).strip(),
+                        value=record["seniority"].strip()[:100],
                         entity_kind="person",
                         entity_name=person,
+                        identity_key="email:" + address,
                     )
                 )
 

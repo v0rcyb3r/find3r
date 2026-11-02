@@ -158,6 +158,12 @@ class Executor:
                 source_record_id=source_record_id,
             )
 
+        except ValueError:
+            return StepResult(
+                spec.name, FAILED, "parse failed: invalid or sensitive provider records",
+                cost_usd=cost, source_record_id=source_record_id,
+            )
+
         written = self.repo.write_facts(
             drafts,
             source_record_id=source_record_id,

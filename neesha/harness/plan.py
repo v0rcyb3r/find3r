@@ -19,11 +19,40 @@ from typing import Iterable, Optional
 from uuid import uuid4
 
 from neesha.adapters import registry
-from neesha.adapters.base import Request
+from neesha.adapters.base import AdapterError, Request
 
 # Named requirement sets an analyst can ask for by name. Each entry is
 # (question, attributes that would answer it).
 PIR_TEMPLATES: dict[str, list[tuple[str, frozenset[str]]]] = {
+    "email-public-presence": [
+        ("Which public GitHub commit observations explicitly match this exact email?", frozenset({"public.email.github"})),
+        ("Which public Gravatar profile observations match the email hash?", frozenset({"public.profile.gravatar"})),
+        ("Which public email reputation observations are available?", frozenset({"public.email.emailrep"})),
+    ],
+    "company-contacts": [
+        ("Which business emails and phone numbers does the company publish?",
+         frozenset({"company.business_email", "company.business_phone"})),
+        ("Which named professional roles are published by the company?",
+         frozenset({"person.role"})),
+    ],
+    "email-posture": [
+        ("What SPF and DMARC policies are published?",
+         frozenset({"email.spf.qualifier", "email.dmarc.policy"})),
+        ("Which public addresses and mail servers are observed?",
+         frozenset({"dns.a", "dns.mx"})),
+    ],
+    "public-history": [
+        ("Which URLs appear in public archives and existing scan records?",
+         frozenset({"web.archive.url", "web.observed.url"})),
+    ],
+    "web-response": [
+        ("What HTTPS and security headers are observed on the company website?",
+         frozenset({"http.status", "tls.connection.validated", "http.security_header"})),
+    ],
+    "tool-discovery": [
+        ("Which hostnames do installed passive discovery tools report?",
+         frozenset({"discovery.subdomain"})),
+    ],
     "attack-surface": [
         (
             "What hostnames does this company expose?",
@@ -82,6 +111,7 @@ class Step:
 class Plan:
     steps: list[Step] = field(default_factory=list)
     pirs: list[PIR] = field(default_factory=list)
+    skipped: list[dict] = field(default_factory=list)
 
     @property
     def estimated_total_usd(self) -> Decimal:
@@ -115,6 +145,7 @@ def build_plan(
     *,
     entity_kind: str = "domain",
     tiers: Optional[set[str]] = None,
+    sources: Optional[set[str]] = None,
 ) -> Plan:
     """Select the adapters that can answer these requirements.
 
@@ -122,11 +153,13 @@ def build_plan(
     twice for one call to satisfy two questions would be exactly the waste
     the ledger exists to prevent.
     """
-    available = registry.produced_attributes(tiers)
+    available = registry.produced_attributes(tiers, sources)
     steps: dict[str, Step] = {}
+    skipped: dict[str, dict] = {}
 
     for pir in pirs:
-        candidates = registry.for_attributes(pir.answers_attributes, tiers)
+        candidates = [cls for cls in registry.for_attributes(pir.answers_attributes, tiers, sources)
+                      if entity_kind in cls.accepts]
         if not candidates:
             pir.status = "unanswerable"
             missing = sorted(
@@ -144,13 +177,17 @@ def build_plan(
         for cls in candidates:
             step = steps.get(cls.name)
             if step is None:
+                try:
+                    estimate = Decimal(str(cls().estimate_cost(request).usd))
+                except (AdapterError, ValueError):
+                    skipped[cls.name] = {"adapter": cls.name, "reason": "Source cost is not configured or cannot be estimated."}
+                    pir.gap_reason = skipped[cls.name]["reason"]
+                    continue
                 step = Step(
                     adapter_name=cls.name,
                     request=request,
                     tier=cls.tier,
-                    estimated_usd=Decimal(
-                        str(cls().estimate_cost(request).usd)
-                    ),
+                    estimated_usd=estimate,
                 )
                 steps[cls.name] = step
             if pir.id not in step.serves:
@@ -160,4 +197,4 @@ def build_plan(
         steps.values(),
         key=lambda s: (registry.TIER_ORDER.get(s.tier, 9), s.estimated_usd, s.adapter_name),
     )
-    return Plan(steps=ordered, pirs=pirs)
+    return Plan(steps=ordered, pirs=pirs, skipped=list(skipped.values()))

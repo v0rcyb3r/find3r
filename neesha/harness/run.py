@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
 from uuid import uuid4
 
 import sqlalchemy as sa
@@ -51,6 +51,7 @@ class RunReport:
     spend_usd: Decimal = Decimal("0")
     skipped: list[dict] = field(default_factory=list)
     estimated_usd: Decimal = Decimal("0")
+    subject_kind: str = "company"
 
     @property
     def facts_written(self) -> int:
@@ -77,6 +78,9 @@ def execute_run(
     caps: Optional[RunCaps] = None,
     adapters: Optional[dict[str, Any]] = None,
     tiers: Optional[set[str]] = None,
+    sources: Optional[set[str]] = None,
+    progress: Optional[Callable[[dict], None]] = None,
+    subject_kind: str = "domain",
 ) -> RunReport:
     """Run one cycle and return what it learned and what it did not.
 
@@ -88,7 +92,19 @@ def execute_run(
         max_steps=25, max_spend_usd=Decimal("1.00"), max_wall_secs=600
     )
 
-    company_id = Repository.ensure_company(engine, company)
+    # Validate direction before creating a run that could be left running.
+    if subject_kind == 'email' and tuple(pir_templates) == ('attack-surface',):
+        pir_templates = ('email-public-presence',)
+    pirs = expand_templates(pir_templates)
+    if subject_kind not in ('domain', 'company', 'email'):
+        raise ValueError('Only domain/company and exact-email runs are connected.')
+    if subject_kind == 'email':
+        from neesha.resolve.intake import resolve_seed
+        company = resolve_seed(company, 'email')['normalized']
+    plan = build_plan(pirs, company, entity_kind=subject_kind, tiers=tiers, sources=sources)
+
+    company_id = (Repository.ensure_email(engine, company) if subject_kind == 'email'
+                  else Repository.ensure_company(engine, company))
     run_id = uuid4().hex
     started = _now()
     monotonic_start = time.monotonic()
@@ -108,7 +124,7 @@ def execute_run(
             )
         )
 
-    repo = Repository(engine, company_id=company_id, run_id=run_id)
+    repo = Repository(engine, company_id=company_id, run_id=run_id, subject_kind=subject_kind)
     executor = Executor(
         gate=gate,
         ledger=ledger,
@@ -118,11 +134,8 @@ def execute_run(
         caps=caps,
     )
 
-    pirs = expand_templates(pir_templates)
-    plan = build_plan(pirs, company, tiers=tiers)
-
     steps: list[StepResult] = []
-    skipped: list[dict] = []
+    skipped: list[dict] = list(plan.skipped)
     state = RunState()
     stop_reason = STOP_COMPLETE
 
@@ -149,6 +162,9 @@ def execute_run(
             )
             continue
 
+        if progress:
+            progress({"current_source": step.adapter_name, "completed": len(steps),
+                      "total": len(plan.steps)})
         result = executor.execute(
             adapter,
             step.request,
@@ -159,6 +175,9 @@ def execute_run(
             ),
         )
         steps.append(result)
+        if progress:
+            progress({"current_source": step.adapter_name, "completed": len(steps),
+                      "total": len(plan.steps), "last_outcome": result.outcome})
         state = RunState(
             steps_used=state.steps_used + 1,
             spend_used=state.spend_used + result.cost_usd,
@@ -167,7 +186,7 @@ def execute_run(
         if not result.productive:
             skipped.append({"adapter": result.adapter, "reason": result.reason})
 
-    _resolve_pirs(engine, plan, company_id, steps)
+    _resolve_pirs(engine, plan, company_id, run_id, steps)
     _persist_pirs(engine, run_id, plan.pirs)
 
     status = "complete" if stop_reason == STOP_COMPLETE else "stopped"
@@ -194,6 +213,7 @@ def execute_run(
         spend_usd=state.spend_used,
         skipped=skipped,
         estimated_usd=plan.estimated_total_usd,
+        subject_kind=subject_kind,
     )
 
 
@@ -210,7 +230,7 @@ def _stop_condition(
 
 
 def _resolve_pirs(
-    engine: sa.Engine, plan: Plan, company_id: str, steps: list[StepResult]
+    engine: sa.Engine, plan: Plan, company_id: str, run_id: str, steps: list[StepResult]
 ) -> None:
     """Mark each requirement answered, partial, or unanswerable.
 
@@ -234,7 +254,7 @@ def _resolve_pirs(
             wanted
             for wanted in pir.answers_attributes
             if any(
-                got == wanted or got.startswith(wanted + ".") or wanted.startswith(got + ".")
+                got == wanted or got.startswith(wanted + ".")
                 for got in collected
             )
         }
@@ -248,19 +268,26 @@ def _resolve_pirs(
             pir.status = "unanswerable"
             pir.gap_reason = (
                 "; ".join(f"{k}: {v}" for k, v in failure_reasons.items())
+                or pir.gap_reason
                 or "sources ran but produced none of the required attributes"
             )
 
-        pir.fact_ids = _fact_ids_for(engine, company_id, pir.answers_attributes)
+        pir.fact_ids = _fact_ids_for(engine, company_id, run_id, pir.answers_attributes)
 
 
 def _fact_ids_for(
-    engine: sa.Engine, company_id: str, attributes: frozenset[str]
+    engine: sa.Engine, company_id: str, run_id: str, attributes: frozenset[str]
 ) -> list[str]:
     """Facts supporting a requirement, so a claim can be drilled into."""
     if not attributes:
         return []
-    clauses = [schema.fact.c.attribute.like(f"{a}%") for a in sorted(attributes)]
+    clauses = [
+        sa.or_(
+            schema.fact.c.attribute == a,
+            schema.fact.c.attribute.startswith(a + ".", autoescape=True),
+        )
+        for a in sorted(attributes)
+    ]
     with engine.connect() as conn:
         rows = conn.execute(
             sa.select(schema.fact.c.id)
@@ -270,6 +297,7 @@ def _fact_ids_for(
                     schema.entity.c.id == company_id,
                     schema.entity.c.company_id == company_id,
                 ),
+                schema.fact.c.run_id == run_id,
                 sa.or_(*clauses),
             )
         ).scalars()

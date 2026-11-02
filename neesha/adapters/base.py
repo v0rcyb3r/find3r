@@ -25,6 +25,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, ClassVar, Optional, Protocol, runtime_checkable
@@ -47,7 +48,13 @@ class Request:
     params: dict[str, Any] = field(default_factory=dict)
 
     def canonical(self) -> str:
-        parts = [self.entity_kind, self.value.strip().lower()]
+        value = self.value.strip()
+        if self.entity_kind == 'email' and '@' in value:
+            local, domain = value.rsplit('@', 1)
+            value = local + '@' + domain.lower()
+        else:
+            value = value.lower()
+        parts = [self.entity_kind, value]
         parts += [f"{k}={self.params[k]!r}" for k in sorted(self.params)]
         return "|".join(parts)
 
@@ -151,12 +158,20 @@ class FactDraft:
     unit: Optional[str] = None
     is_inference: bool = False
     sensitivity: str = "business"
+    identity_key: Optional[str] = None  # explicit stable identifier, never a name match
 
     def __post_init__(self) -> None:
         if not self.attribute or "." not in self.attribute:
             raise ValueError(
                 f"attribute must be dotted and namespaced, got {self.attribute!r}"
             )
+        segments = self.attribute.lower().replace('-', '_').split('.')
+        if any(segment in {'password', 'passwd', 'password_hash', 'api_key', 'secret',
+                           'access_token', 'credential', 'credentials'} for segment in segments):
+            raise ValueError('Credential material cannot be stored as an intelligence fact.')
+        inspected = re.sub(r'\b(?:password|passwd|api[_-]?key|access[_-]?token|secret[_-]?key)\s*[:=]\s*REDACTED(?=$|[&#;\s])', '', self.value, flags=re.I)
+        if re.search(r'\b(?:password|passwd|api[_-]?key|access[_-]?token|secret[_-]?key)\s*[:=]', inspected, re.I):
+            raise ValueError('Credential-like values cannot be stored as intelligence facts.')
         if self.sensitivity not in ("business", "personal", "restricted"):
             raise ValueError(f"unknown sensitivity {self.sensitivity!r}")
 
@@ -206,6 +221,7 @@ class BaseAdapter:
     produces: ClassVar[frozenset[str]] = frozenset()
     accepts: ClassVar[frozenset[str]] = frozenset({"domain"})
     requires_techniques: ClassVar[frozenset[str]] = frozenset()
+    default_enabled: ClassVar[bool] = True
     retention_days: ClassVar[int] = 30
 
     def estimate_cost(self, request: Request) -> Cost:

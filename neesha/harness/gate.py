@@ -41,6 +41,7 @@ from neesha.ledger.ledger import (
     Ledger,
     NoBudgetConfigured,
     Reservation,
+    period_of,
 )
 
 Outcome = Literal["allowed", "denied", "paused"]
@@ -75,13 +76,22 @@ class EngagementView:
     authorized_domains: tuple[str, ...] = ()
     starts_at: Optional[datetime] = None
     expires_at: Optional[datetime] = None
+    authorized_emails: tuple[str, ...] = ()
 
     def covers(self, target: str) -> bool:
-        """True if the target is inside the engagement's authorized domains.
+        """Match a domain scope or an independently authorized exact email.
 
         An empty list authorizes nothing. Defaulting to "all" here would make
         an unconfigured engagement the most permissive one.
         """
+        if '@' in target:
+            from neesha.resolve.intake import resolve_seed
+            try:
+                normalized = resolve_seed(target, 'email')['normalized']
+                allowed = {resolve_seed(email, 'email')['normalized'] for email in self.authorized_emails}
+            except ValueError:
+                return False
+            return normalized in allowed
         if not self.authorized_domains:
             return False
         t = target.strip().lower().rstrip(".")
@@ -195,9 +205,12 @@ class PolicyGate:
         if not engagement.covers(target):
             return Decision(
                 "denied",
-                f"{target!r} is not an authorized domain for engagement "
+                f"{target!r} is not an authorized domain or exact email for engagement "
                 f"{engagement.id}",
             )
+
+        if '@' in target and adapter.collection_mode != 'third_party_passive':
+            return Decision('denied', 'Email-root research permits public-source passive collection only.')
 
         # 3. Does the authority basis permit this tier?
         if adapter.tier == "D":
@@ -249,7 +262,7 @@ class PolicyGate:
         if estimate > 0:
             try:
                 reservation = self.ledger.reserve(
-                    adapter.name, estimate, run_id=run_id
+                    adapter.name, estimate, period=period_of(now), run_id=run_id
                 )
             except BudgetExceeded as exc:
                 return Decision("denied", str(exc))

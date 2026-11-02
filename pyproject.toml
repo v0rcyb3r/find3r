@@ -37,3 +37,6 @@ include = ["neesha*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.setuptools.package-data]
+"neesha.console" = ["static/*.html", "static/*.css", "static/*.js"]
