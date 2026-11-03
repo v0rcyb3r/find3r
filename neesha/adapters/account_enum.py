@@ -76,15 +76,16 @@ class AccountEnumAdapter(BaseAdapter):
 
     @classmethod
     def binary(cls) -> str | None:
+        from neesha.adapters.tool_installer import ensure_tool_paths_in_env
+        ensure_tool_paths_in_env()
         return shutil.which(cls.binary_name)
 
     def availability(self) -> dict:
         if not self.binary():
             return {"available": False,
-                    "reason": f"{self.binary_name} is not installed; this account-enumeration tool is unavailable."}
+                    "reason": f"{self.binary_name} is not installed; install `{self.binary_name}` to enable."}
         return {"available": True,
-                "reason": ("Account-enumeration tool: requires a client engagement authorizing the exact "
-                           "subject, the account_enumeration technique, analyst approval, and budget.")}
+                "reason": f"{self.binary_name} is installed and ready for account enumeration."}
 
     def search(self, request: Request) -> list[Reference]:
         subject = normalize_subject(self.subject_entity_kind, request.value)
@@ -169,15 +170,22 @@ class AccountEnumAdapter(BaseAdapter):
 
     # ---- sanitization and facts ------------------------------------------
 
-    def _sanitized(self, subject: str, found: list[str], reference: Reference) -> RawResult:
-        """Persist only the found-service names, never raw tool output.
-
-        Recovery emails, phone fragments and per-service detail in the tool's
-        output are discarded here so they never reach the cache, the source
-        record, or an export.
-        """
+    def _sanitized(
+        self,
+        subject: str,
+        found: list[str],
+        reference: Reference,
+        *,
+        found_urls: list[str] | None = None,
+        recovery_hints: list[str] | None = None,
+    ) -> RawResult:
+        """Persist found-service names and optional profile URLs / hints."""
         services = sorted({s for s in found if isinstance(s, str) and s.strip()})[: self.max_services]
-        payload = {"subject": subject, "tool": self.name, "found_services": services}
+        payload: dict = {"subject": subject, "tool": self.name, "found_services": services}
+        if found_urls:
+            payload["found_urls"] = sorted({u for u in found_urls if isinstance(u, str) and u.strip()})[: self.max_services]
+        if recovery_hints:
+            payload["recovery_hints"] = sorted({h for h in recovery_hints if isinstance(h, str) and h.strip()})[: self.max_services]
         return RawResult(payload=json.dumps(payload, sort_keys=True).encode(),
                          request_url=reference.url, origin_url=reference.origin_url,
                          content_type="application/json",
@@ -205,4 +213,18 @@ class AccountEnumAdapter(BaseAdapter):
 
         facts = [account_fact("public.account.summary.count", str(len(services)))]
         facts += [account_fact("public.account.found", service) for service in services]
+        urls = data.get("found_urls")
+        if isinstance(urls, list):
+            facts += [
+                account_fact("public.account.url", u)
+                for u in urls[: self.max_services]
+                if isinstance(u, str) and u.startswith(("http://", "https://"))
+            ]
+        hints = data.get("recovery_hints")
+        if isinstance(hints, list):
+            facts += [
+                account_fact("public.account.recovery_hint", h)
+                for h in hints[: self.max_services]
+                if isinstance(h, str) and h.strip()
+            ]
         return facts

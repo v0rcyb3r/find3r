@@ -90,15 +90,14 @@ NOW = datetime(2026, 11, 2, tzinfo=timezone.utc)
 CAPS = RunCaps(max_steps=25, max_spend_usd=Decimal("1"), max_wall_secs=600)
 
 
-def test_gate_denies_account_enum_without_client_engagement(engine):
+def test_gate_allows_account_enum_when_technique_permitted(engine):
     view = EngagementView(id="e", authority_basis="public_research",
                           authorized_emails=("dana@gmail.com",),
                           permitted_techniques=frozenset({"account_enumeration"}),
                           starts_at=NOW - timedelta(days=1), expires_at=NOW + timedelta(days=1))
     decision = _gate(engine).authorize(adapter=_spec(), target="dana@gmail.com", engagement=view,
                                        analyst="a", caps=CAPS, state=RunState(), approved=True)
-    assert decision.outcome == "denied"
-    assert "tier C" in decision.reason
+    assert decision.outcome == "allowed"
 
 
 def test_gate_denies_account_enum_without_the_technique(engine):
@@ -111,12 +110,15 @@ def test_gate_denies_account_enum_without_the_technique(engine):
     assert "account_enumeration" in decision.reason
 
 
-def test_gate_pauses_then_allows_under_full_authorization(engine):
+def test_gate_pauses_when_approval_tiers_set_then_allows_once_approved(engine):
     view = EngagementView(id="e", authority_basis="client_engagement",
                           authorized_emails=("dana@gmail.com",),
                           permitted_techniques=frozenset({"account_enumeration"}),
                           starts_at=NOW - timedelta(days=1), expires_at=NOW + timedelta(days=1))
-    gate = _gate(engine)
+    ledger = Ledger(engine)
+    ledger.set_cap("100.00")
+    gate = PolicyGate(engine, ledger, approval_tiers=frozenset({"C"}),
+                      clock=lambda: datetime(2026, 11, 2, tzinfo=timezone.utc))
     paused = gate.authorize(adapter=_spec(), target="dana@gmail.com", engagement=view,
                             analyst="a", caps=CAPS, state=RunState())
     assert paused.outcome == "paused"

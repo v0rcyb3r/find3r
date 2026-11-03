@@ -14,7 +14,20 @@ from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from typing import Any, Sequence
 
 from neesha.ledger.ledger import CENTS, Ledger, LedgerError
+from neesha.runtime.ollama import DEFAULT_OLLAMA_MODEL, _strip_reasoning_wrappers, generate_ollama, valid_ollama_model
 from neesha.runtime.providers import API_CONTRACTS, Provider, ProviderConfig, ProviderError
+
+
+def _is_ollama_provider(name: str) -> bool:
+    return isinstance(name, str) and (name == 'ollama' or name.startswith('ollama:'))
+
+
+def _resolve_ollama_model(name: str) -> str:
+    if name == 'ollama':
+        raw = os.environ.get('NEESHA_OLLAMA_MODEL', '').strip() or DEFAULT_OLLAMA_MODEL
+    else:
+        raw = name.split(':', 1)[1].strip()
+    return valid_ollama_model(raw)
 
 MAX_FACTS = 150
 MAX_VALUE_CHARS = 1500
@@ -23,19 +36,55 @@ MAX_CLAIM_CHARS = 1200
 MAX_ACTOR_BYTES = 110_000
 INFRA_ATTRIBUTES = frozenset({
     'dns.a', 'dns.aaaa', 'dns.mx', 'dns.ns', 'dns.soa', 'dns.caa', 'dns.cname',
-    'dns.subdomain', 'dns.passive.ipv4', 'dns.passive.ipv6',
-    'discovery.subdomain', 'discovery.source', 'tls.ct.issuer',
-    'email.spf.record', 'email.spf.qualifier', 'email.dmarc.record', 'email.dmarc.policy',
+    'dns.subdomain', 'dns.passive.ipv4', 'dns.passive.ipv6', 'dnssec.status',
+    'discovery.subdomain', 'discovery.source',
+    'tls.ct.issuer', 'tls.issuer', 'tls.not_after', 'tls.days_remaining', 'tls.san',
+    'email.spf.record', 'email.spf.qualifier',
+    'email.dmarc.record', 'email.dmarc.policy', 'email.dmarc.rua', 'email.dmarc.pct',
+    'email.dkim.selector',
+    'email.mtasts.present', 'email.mtasts.record',
+    'email.tlsrpt.present', 'email.tlsrpt.record',
+    'http.security_assessed',
+    'http.security_header.strict-transport-security',
+    'http.security_header.content-security-policy',
+    'http.security_header.x-frame-options',
+    'http.security_header.x-content-type-options',
+    'http.security_header.referrer-policy',
+    'http.security_header.permissions-policy',
+    'host.port', 'host.cpe', 'host.reverse_dns', 'host.tag', 'host.vuln',
+    'host.asn', 'host.asn_name', 'host.org', 'host.network_name', 'host.cidr', 'host.country',
+    'tech.server', 'tech.cdn', 'tech.framework', 'tech.cms', 'tech.analytics',
+    'web.title', 'web.description',
+    'whois.registrar', 'whois.registered', 'whois.created', 'whois.updated', 'whois.expires',
+    'whois.nameserver', 'whois.status', 'whois.org', 'whois.network_name', 'whois.cidr', 'whois.country',
+    'intelx.record.name', 'intelx.record.bucket', 'intelx.record.date', 'intelx.record.media',
+    'intelx.search.sample_count', 'intelx.search.is_partial',
 })
 COMPANY_ATTRIBUTES = frozenset({
-    'company.business_email', 'company.business_phone', 'person.business_email',
-    'person.business_phone', 'person.role', 'person.seniority', 'email.pattern',
+    'company.business_email', 'company.business_phone', 'company.social_url',
+    'person.business_email', 'person.business_phone', 'person.role', 'person.seniority',
+    'person.department', 'person.linkedin_url', 'person.twitter_handle',
+    'email.pattern',
 })
 PUBLIC_EMAIL_ATTRIBUTES = frozenset({
+    'public.email.syntax', 'public.email.local_part', 'public.email.mailbox_type',
+    'public.email.provider', 'public.email.deliverable_mx', 'public.email.mx_host',
+    'public.email.domain_spf', 'public.email.domain_dmarc', 'public.email.pgp_key',
+    'public.email.checked_services', 'public.email.handle_correlation',
     'public.email.github.commit_url', 'public.email.github.author_name',
-    'public.email.github.linked_login', 'public.profile.gravatar.url',
-    'public.profile.gravatar.display_name', 'public.email.emailrep.reference_count',
-    'public.profile.gravatar.linked_profile_url',
+    'public.email.github.linked_login', 'public.email.github.repo',
+    'public.email.github.commit_date',
+    'public.profile.gravatar.url', 'public.profile.gravatar.display_name',
+    'public.profile.gravatar.job_title', 'public.profile.gravatar.company',
+    'public.profile.gravatar.bio', 'public.profile.gravatar.description',
+    'public.profile.gravatar.location', 'public.profile.gravatar.linked_profile_url',
+    'public.email.emailrep.reference_count', 'public.email.emailrep.reputation',
+    'public.email.emailrep.suspicious', 'public.email.emailrep.credentials_leaked',
+    'public.email.emailrep.data_breach', 'public.email.emailrep.first_seen',
+    'public.email.emailrep.last_seen', 'public.email.emailrep.domain_exists',
+    'public.email.emailrep.deliverable', 'public.email.emailrep.profile_hint',
+    'public.account.found', 'public.account.url', 'public.account.recovery_hint',
+    'public.account.summary.count',
 })
 ID = re.compile(r'[A-Za-z0-9_-]{1,64}\Z')
 SECRET_PATTERN = re.compile(
@@ -102,7 +151,7 @@ def _safe_facts(brief: dict) -> tuple[list[dict], int]:
         raise RuntimeAnalysisError('Expected guarded facts in the investigation brief.')
     facts, omitted, seen = [], 0, set()
     seed = brief.get('seed')
-    email_subject = (seed.get('normalized') if isinstance(seed, dict) else None) if brief.get('subject_kind') == 'email' else None
+    email_subject = (seed.get('normalized') if isinstance(seed, dict) else None) if brief.get('subject_kind') in ('email', 'username') else None
     for row in candidates:
         if not isinstance(row, dict):
             omitted += 1
@@ -140,7 +189,8 @@ def _safe_facts(brief: dict) -> tuple[list[dict], int]:
 
 def _validate_claims(raw: str, input_facts: list[dict], provider: str, model: str) -> list[dict]:
     try:
-        data = json.loads(raw)
+        cleaned = _strip_reasoning_wrappers(raw) if isinstance(raw, str) else raw
+        data = json.loads(cleaned)
     except (TypeError, ValueError):
         raise RuntimeAnalysisError('Model output was not valid analysis JSON.') from None
     if not isinstance(data, dict) or set(data) != {'claims'} or not isinstance(data['claims'], list):
@@ -189,7 +239,7 @@ def analyze_brief(
         names = list(provider_names)
     except TypeError:
         raise RuntimeAnalysisError('Choose explicit runtime providers.') from None
-    if (not names or any(not isinstance(n, str) or n not in API_CONTRACTS for n in names)
+    if (not names or any(not isinstance(n, str) or (n not in API_CONTRACTS and not _is_ollama_provider(n)) for n in names)
             or len(set(names)) != len(names)
             or (mode == 'single' and len(names) != 1)
             or (mode == 'multi' and not 2 <= len(names) <= 3)):
@@ -198,14 +248,21 @@ def analyze_brief(
     if run_id is not None and (not isinstance(run_id, str) or not ID.fullmatch(run_id)):
         raise RuntimeAnalysisError('Invalid investigation run identifier.')
     max_spend = _money(max_spend_usd, 'Runtime spend limit', round_charge=False)
-    configs, prices = {}, {}
+    configs, ollama_models, prices = {}, {}, {}
     for name in names:
-        try:
-            configs[name] = ProviderConfig.from_env(name)
-        except ProviderError:
-            raise RuntimeAnalysisError(f'Runtime provider {name} needs an explicit model and API key.') from None
-        cap_env = f'NEESHA_{name.upper()}_CALL_CAP_USD'
-        prices[name] = _money(os.environ.get(cap_env, ''), cap_env)
+        if _is_ollama_provider(name):
+            try:
+                ollama_models[name] = _resolve_ollama_model(name)
+            except ValueError as exc:
+                raise RuntimeAnalysisError(str(exc)) from None
+            prices[name] = Decimal('0')
+        else:
+            try:
+                configs[name] = ProviderConfig.from_env(name)
+            except ProviderError:
+                raise RuntimeAnalysisError(f'Runtime provider {name} needs an explicit model and API key.') from None
+            cap_env = f'NEESHA_{name.upper()}_CALL_CAP_USD'
+            prices[name] = _money(os.environ.get(cap_env, ''), cap_env)
 
     facts, omitted = _safe_facts(brief)
     result = {
@@ -221,7 +278,7 @@ def analyze_brief(
         return result
     if mode == 'single':
         plan = [('synthesis', names[0], facts)]
-    elif brief.get('subject_kind') == 'email':
+    elif brief.get('subject_kind') in ('email', 'username'):
         publications = [f for f in facts if f['attribute'].startswith('public.email.github.')]
         profiles = [f for f in facts if not f['attribute'].startswith('public.email.github.')]
         plan = [('publication_specialist', names[0], publications),
@@ -246,7 +303,7 @@ def analyze_brief(
     try:
         for role, name, actor_facts in plan:
             reservation = (ledger.reserve('runtime:' + name, prices[name], run_id=brief.get('run_id'))
-                           if actor_facts else None)
+                           if actor_facts and prices[name] > 0 else None)
             reserved.append((role, name, actor_facts, reservation))
     except LedgerError:
         for _, _, _, reservation in reserved:
@@ -260,7 +317,10 @@ def analyze_brief(
     failed = False
     try:
         for role, name, actor_facts, reservation in reserved:
-            report = {'role': role, 'provider': name, 'model': configs[name].model,
+            is_local = name in ollama_models
+            model_name = ollama_models[name] if is_local else configs[name].model
+            provider_label = 'ollama' if is_local else name
+            report = {'role': role, 'provider': provider_label, 'model': model_name,
                       'status': 'skipped', 'claims': [], 'cost_usd': '0'}
             result['reports'].append(report)
             if failed or not actor_facts:
@@ -275,12 +335,17 @@ def analyze_brief(
                 failed = True
                 continue
             try:
-                raw = Provider(configs[name]).generate(SYSTEM, payload)
+                if is_local:
+                    raw = generate_ollama(model_name, SYSTEM, payload)
+                else:
+                    raw = Provider(configs[name]).generate(SYSTEM, payload)
             except Exception as exc:
-                paid_or_uncertain = (not isinstance(exc, ProviderError)
-                                     or exc.response_received or exc.cost_uncertain)
-                remaining.remove(reservation.id)
-                if paid_or_uncertain:
+                paid_or_uncertain = (not is_local) and (
+                    not isinstance(exc, ProviderError) or exc.response_received or exc.cost_uncertain
+                )
+                if reservation is not None:
+                    remaining.remove(reservation.id)
+                if paid_or_uncertain and reservation is not None:
                     # A response or uncertain transport may have incurred cost.
                     # Preserve its reservation if settlement itself fails.
                     try:
@@ -291,21 +356,24 @@ def analyze_brief(
                     report['cost_usd'] = str(prices[name])
                     reason = 'Provider response failed or cost was uncertain; conservative charge retained.'
                 else:
-                    ledger.release(reservation.id)
-                    reason = 'Provider call failed before a billable response; reservation released.'
+                    if reservation is not None:
+                        ledger.release(reservation.id)
+                    reason = (str(exc) if is_local and isinstance(exc, ProviderError)
+                              else 'Provider call failed before a billable response; reservation released.')
                 report.update(status='failed', reason=reason)
                 failed = True
                 continue
-            # The provider returned a paid response, even when JSON validation fails.
-            remaining.remove(reservation.id)
+            # The provider returned a response, even when JSON validation fails.
+            if reservation is not None:
+                remaining.remove(reservation.id)
+                try:
+                    ledger.settle(reservation.id, prices[name])
+                except LedgerError:
+                    raise RuntimeAnalysisError('A paid model call could not be settled; its reservation remains held.') from None
+                spend += prices[name]
+                report['cost_usd'] = str(prices[name])
             try:
-                ledger.settle(reservation.id, prices[name])
-            except LedgerError:
-                raise RuntimeAnalysisError('A paid model call could not be settled; its reservation remains held.') from None
-            spend += prices[name]
-            report['cost_usd'] = str(prices[name])
-            try:
-                claims = _validate_claims(raw, actor_facts, name, configs[name].model)
+                claims = _validate_claims(raw, actor_facts, provider_label, model_name)
             except RuntimeAnalysisError as exc:
                 report.update(status='failed', reason=str(exc))
                 failed = True

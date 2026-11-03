@@ -164,7 +164,7 @@ def test_intelx_gate_requires_client_scope_technique_approval_and_budget(engine,
     from neesha.ledger.ledger import Ledger
 
     ledger = Ledger(engine)
-    gate = PolicyGate(engine, ledger)
+    gate = PolicyGate(engine, ledger, approval_tiers=frozenset({'C'}))
     caps = RunCaps(10, Decimal('1'), 60)
     base = dict(id='client', authorized_domains=('acme.com',))
     def ask(engagement, approved=False):

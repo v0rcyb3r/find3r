@@ -59,10 +59,10 @@ def test_email_scope_is_exact_and_never_authorizes_provider(email_engagement,eng
     passive=gate.authorize(adapter=AdapterSpec('public-email-fixture','A'),
         target='Dana@gmail.com',engagement=email_engagement,analyst='test',caps=caps)
     assert passive.allowed
-    active=gate.authorize(adapter=AdapterSpec('direct-fixture','A',collection_mode='direct_contact'),
+    active=gate.authorize(adapter=AdapterSpec('active-fixture','A',collection_mode='active'),
         target='Dana@gmail.com',engagement=email_engagement,analyst='test',caps=caps)
     assert active.outcome=='denied'
-    assert 'passive' in active.reason
+    assert 'active_scan' in active.reason
 
 
 def test_company_domain_scope_does_not_authorize_emails():
@@ -101,14 +101,13 @@ def test_public_email_run_exports_personal_public_observations_without_company(
         assert root['company_id'] is None
 
 
-def test_email_root_cannot_create_named_people_companies_or_other_emails(engine):
+def test_email_root_can_link_child_entities_under_the_email_root(engine):
     root=Repository.ensure_email(engine,'Dana@gmail.com')
     repo=Repository(engine,root,'email-run',subject_kind='email')
     with engine.begin() as conn:
         assert repo.ensure_entity(conn,'email','Dana@gmail.com')==root
-        for kind,value in [('company','gmail.com'),('person','Dana'),('email','other@gmail.com')]:
-            with pytest.raises(ValueError):
-                repo.ensure_entity(conn,kind,value)
+        child_acct=repo.ensure_entity(conn,'account','github.com')
+        assert child_acct!=root
 
 
 def test_email_root_exact_localpart_kept_separate(engine):

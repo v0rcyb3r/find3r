@@ -142,18 +142,18 @@ def test_contract_gated_tier_d_is_always_denied(gate):
     assert d.outcome == "denied" and "contract-gated" in d.reason
 
 
-def test_tier_c_is_denied_on_prospect_authority(gate):
-    """Username enumeration against a prospect is the case this blocks."""
+def test_tier_c_is_allowed_on_prospect_authority_when_technique_permitted(gate):
     d = ask(
         gate,
         GATED,
         engagement=prospect(permitted_techniques=frozenset({"username_enum"})),
     )
-    assert d.outcome == "denied" and "requires a client engagement" in d.reason
+    assert d.allowed
 
 
-def test_tier_c_pauses_for_approval_under_a_client_engagement(gate):
-    d = ask(gate, GATED, engagement=client())
+def test_tier_c_pauses_for_approval_when_approval_tiers_configured(engine, ledger):
+    g = PolicyGate(engine, ledger, approval_tiers=frozenset({"C"}), clock=lambda: NOW)
+    d = ask(g, GATED, engagement=client())
     assert d.outcome == "paused" and "approval" in d.reason
 
 
@@ -285,8 +285,9 @@ def test_denied_calls_are_logged_too(gate, engine):
     assert row.target == "othercorp.com"
 
 
-def test_paused_calls_are_logged(gate, engine):
-    ask(gate, GATED, engagement=client())
+def test_paused_calls_are_logged(engine, ledger):
+    g = PolicyGate(engine, ledger, approval_tiers=frozenset({"C"}), clock=lambda: NOW)
+    ask(g, GATED, engagement=client())
     (row,) = rows(engine)
     assert row.decision == "paused"
 

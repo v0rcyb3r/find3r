@@ -83,3 +83,16 @@ class DNSResult(BaseModel):
     ns: list[str] = Field(default_factory=list)
     soa: list[str] = Field(default_factory=list)
     caa: list[str] = Field(default_factory=list)
+
+
+class Grade(BaseModel):
+    letter: str
+    score: int
+    rationale: str
+
+
+class Trigger(BaseModel):
+    signal: str
+    why_now: str
+    offering: str
+

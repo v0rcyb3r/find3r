@@ -835,7 +835,8 @@ def test_tier_c_source_pauses_until_an_analyst_approves(engine, ledger, gate):
             max_wall_secs=CAPS.max_wall_secs, started_at=NOW,
         ))
     repo = Repository(engine, company_id=company_id, run_id="run-c")
-    ex = Executor(gate=gate, ledger=ledger, repository=repo, engagement=client,
+    gated = PolicyGate(engine, ledger, approval_tiers=frozenset({"C"}), clock=lambda: NOW)
+    ex = Executor(gate=gated, ledger=ledger, repository=repo, engagement=client,
                   analyst="a", caps=CAPS)
 
     paused = ex.execute(FakeTierC(), Request("domain", "acme.com"))

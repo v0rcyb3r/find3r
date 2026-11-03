@@ -35,7 +35,7 @@ budget_app = typer.Typer(help="Spend caps and the ledger.", no_args_is_help=True
 harness_app.add_typer(engagement_app, name="engagement")
 harness_app.add_typer(budget_app, name="budget")
 
-AUTHORITY_BASES = ("own_org", "prospect_company", "client_engagement")
+AUTHORITY_BASES = ("own_org", "prospect_company", "client_engagement", "public_research")
 
 
 def get_engine() -> sa.Engine:
@@ -48,9 +48,16 @@ def get_engine() -> sa.Engine:
         db.parent.mkdir(parents=True, exist_ok=True)
         # Owner-only: the SQLite file is unencrypted and holds personal data.
         harden_path(db.parent)
-        engine = sa.create_engine(url)
+        engine = sa.create_engine(url, connect_args={"timeout": 30, "check_same_thread": False})
 
-        def _harden(*_):
+        def _harden(dbapi_conn, *_):
+            try:
+                cur = dbapi_conn.cursor()
+                cur.execute("PRAGMA journal_mode=WAL;")
+                cur.execute("PRAGMA busy_timeout=30000;")
+                cur.close()
+            except Exception:
+                pass
             # The database and its WAL/SHM/journal sidecars are created lazily,
             # so harden them on connect, when they exist.
             harden_path(db)
@@ -268,22 +275,41 @@ def harness_run(
     ),
     kind: str = typer.Option(
         "auto", "--kind",
-        help="Subject kind: auto | domain | email | username (auto: email if it contains @, else domain)",
+        help="Subject kind: auto | domain | email | username | ip | phone | company | person",
+    ),
+    deep: bool = typer.Option(
+        False, "--deep",
+        help="Run all PIR templates and all available adapters concurrently",
     ),
     max_steps: int = typer.Option(25, "--max-steps"),
     max_spend: float = typer.Option(1.00, "--max-spend", help="Per-run USD cap"),
     max_seconds: int = typer.Option(600, "--max-seconds"),
     out: Path = typer.Option(Path("reports"), "--out", help="Briefing output directory"),
 ) -> None:
-    """Run one intelligence cycle against a domain, exact email, or username."""
+    """Run one intelligence cycle against a domain, exact email, username, IP, phone, or person."""
+    from neesha.adapters import registry
+    from neesha.resolve.intake import resolve_seed
+
     engine = get_engine()
     _require_schema(engine)
     who = analyst or os.environ.get("USER", "analyst")
 
-    if kind not in ("auto", "domain", "email", "username"):
-        console.print("[red]--kind must be auto, domain, email, or username[/red]")
+    if kind not in ("auto", "domain", "email", "username", "ip", "phone", "company", "person"):
+        console.print("[red]--kind must be auto, domain, email, username, ip, phone, company, or person[/red]")
         raise typer.Exit(1)
-    subject_kind = ("email" if "@" in company else "domain") if kind == "auto" else kind
+    if kind == "auto":
+        try:
+            detected = resolve_seed(company, "auto")["kind"]
+            if detected == "website":
+                subject_kind = "domain"
+            elif detected == "name":
+                subject_kind = "username" if " " not in company.strip() else "company"
+            else:
+                subject_kind = detected
+        except ValueError:
+            subject_kind = "email" if "@" in company else "domain"
+    else:
+        subject_kind = kind
 
     if engagement_id:
         view = _resolve_engagement(engine, engagement_id, company)
@@ -317,15 +343,36 @@ def harness_run(
         )
         raise typer.Exit(1)
 
-    # Self-authorization never confers client-engagement authority or active
-    # techniques, so the tier-C person-enumeration sources and active
-    # collection stay gated exactly as before — this only removes setup for
-    # the passive prospect/public research an operator is entitled to run.
     ledger = Ledger(engine)
     gate = PolicyGate(engine, ledger)
-    default_template = {"email": "email-public-presence",
-                        "username": "username-account-presence"}.get(subject_kind, "attack-surface")
-    templates = tuple(pir or (default_template,))
+    if deep and not pir:
+        if subject_kind == "email":
+            templates = ("email-public-presence", "email-account-presence")
+        elif subject_kind == "username":
+            templates = ("username-account-presence",)
+        elif subject_kind == "ip":
+            templates = ("ip-infrastructure", "whois-registration")
+        else:
+            templates = (
+                "attack-surface",
+                "company-contacts",
+                "email-posture",
+                "public-history",
+                "web-response",
+                "tool-discovery",
+                "whois-registration",
+                "ip-infrastructure",
+            )
+    else:
+        default_templates = {
+            "email": ("email-public-presence", "email-account-presence"),
+            "username": ("username-account-presence",),
+            "ip": ("ip-infrastructure", "whois-registration"),
+        }.get(subject_kind, ("attack-surface",))
+        templates = tuple(pir) if pir else default_templates
+
+    use_all_available = deep or subject_kind in ("email", "username", "ip")
+    sources = {s["name"] for s in registry.catalog() if s["available"]} if use_all_available else None
 
     console.print(f"[bold]{company}[/bold]  engagement {view.id[:12]}  "
                   f"PIRs: {', '.join(templates)}")
@@ -344,8 +391,10 @@ def harness_run(
                 max_spend_usd=Decimal(str(max_spend)),
                 max_wall_secs=max_seconds,
             ),
+            sources=sources,
             approve=set(approve or []),
             subject_kind=subject_kind,
+            parallel=deep,
         )
     except KeyError as exc:
         console.print(f"[red]{exc}[/red]")
@@ -454,8 +503,10 @@ def _self_authorize(
         authority, usernames, subject = "public_research", (seed["normalized"],), seed["normalized"]
     elif seed["kind"] in ("domain", "website") and seed.get("domain"):
         authority, domains, subject = "prospect_company", (seed["domain"],), seed["domain"]
+    elif seed["kind"] in ("ip", "phone", "company", "person"):
+        authority, domains, subject = "prospect_company", (seed["normalized"],), seed["normalized"]
     else:
-        raise ValueError(f"{target!r} is not a domain, exact email, or username; create an engagement explicitly.")
+        raise ValueError(f"{target!r} is not a recognized target seed; create an engagement explicitly.")
 
     now = _now()
     engagement_id = uuid4().hex

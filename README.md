@@ -1,19 +1,16 @@
-# NEESHA
+# Find3r
 
-NEESHA is an internal OSINT intelligence harness for cybersecurity analysts.
-Investigations may start from a company domain or an independent exact email.
-An analyst states Priority Intelligence
-Requirements (PIRs), and reviews collected assertions, inferences, and gaps.
-It does not manage a CRM or send outreach.
+**Find3r** (`find3r`) is a tactical OSINT intelligence & security posture workbench for cybersecurity analysts.
+Investigations may start from a domain, company, email address, username, IP address, phone number, or person name.
+An analyst states Priority Intelligence Requirements (PIRs) and reviews collected assertions, A–F security posture grades, prioritized exposures, evidence graphs, and cited local or cloud AI synthesis.
 
-The workspace integrates six free collectors: **company website** (published
-business contacts, explicit professional roles, actual homepage headers),
-**DNS posture** (DNS, SPF, DMARC), **crt.sh**, **AlienVault OTX**, **Wayback CDX**,
-and existing **urlscan** observations. **Hunter** is optional paid enrichment,
-not a prerequisite for contacts. An optional **Subfinder** runner is implemented
-but disabled until its home-directory configuration writes are approved. Certificate
-transparency records describe historical certificate observations; they do not
-prove a host is currently reachable or vulnerable.
+## Highlights
+
+- **3-Pane Tactical Workbench (`http://127.0.0.1:8765`):** Modern minimalist rounded interface with a Tactical Omnibar, Dossier History & Execution Route dock, main canvas, and right slide-over Source Inspector with 1-click selector pivoting.
+- **24 Parallel OSINT & Posture Sensors:** DNS/DNSSEC, TLS certificates (`crt.sh` + live TLS), HTTP security headers, RDAP/WHOIS, Shodan InternetDB, HackerTarget passive DNS, AlienVault OTX, Wayback CDX, URLScan, GitHub commit search, Gravatar, Email OSINT, Username OSINT, Hunter, EmailRep, Intelligence X, plus hardened CLI runners for `subfinder`, `amass`, `theHarvester`, `holehe`, `socialscan`, `sherlock`, and `maigret`.
+- **Local AI Engine via Ollama (`$0.00` Cost, Offline Private):** Run cited single-model or multi-model (2 specialists + reviewer) synthesis locally via Ollama (`127.0.0.1:11434`). Supports curated catalog models (`llama3.1:8b`, `qwen2.5:7b`, `deepseek-r1:8b`, `mistral:7b`, `gemma2:9b`, `llama3.3:70b`, `phi4:14b`, `llama3.2:3b`), automatic discovery of manually installed models (`ollama pull`, `ollama create`, HuggingFace `hf.co/...`), and direct `.gguf` / `Modelfile` import in the UI.
+- **Pre-Install Download Kit (Windows `.ps1`, Linux `.sh`, macOS `.sh`):** One-click downloadable scripts that install all OSINT CLI binaries, the Ollama runtime, and pull the default `llama3.1:8b` model.
+- **Ephemeral Vultr Cloud VPS Nodes:** Provision randomized, unattributable Ubuntu 24.04 LTS VPS nodes via Vultr API v2 to route OSINT scans over SSH or share with teammates.
 
 ## Run locally
 
@@ -24,18 +21,14 @@ make install
 # Initialize the local SQLite harness database:
 .venv/bin/alembic upgrade head
 
-.venv/bin/neesha harness engagement create \
-  --domain example.com --by analyst@example.org
-
-# Free certificate-transparency collection, no API key required:
-.venv/bin/neesha harness run example.com --pir attack-surface --out ./reports
+# Start the Find3r Web Workbench on http://127.0.0.1:8765:
+./find3r serve --port 8765
 ```
 
-## Local investigator workspace
+Or run CLI investigations directly:
 
 ```bash
-.venv/bin/neesha harness serve --port 8766
-# Open http://127.0.0.1:8766
+./find3r run example.com --pir attack-surface --out ./reports
 ```
 
 The new workspace reads the harness database. Enter a domain or website and

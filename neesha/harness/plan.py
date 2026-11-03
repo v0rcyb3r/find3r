@@ -25,6 +25,7 @@ from neesha.adapters.base import AdapterError, Request
 # (question, attributes that would answer it).
 PIR_TEMPLATES: dict[str, list[tuple[str, frozenset[str]]]] = {
     "email-public-presence": [
+        ("What mail provider, deliverability, and public email OSINT signals exist for this address?", frozenset({"public.email.provider", "public.email.deliverable_mx"})),
         ("Which public GitHub commit observations explicitly match this exact email?", frozenset({"public.email.github"})),
         ("Which public Gravatar profile observations match the email hash?", frozenset({"public.profile.gravatar"})),
         ("Which public email reputation observations are available?", frozenset({"public.email.emailrep"})),
@@ -60,6 +61,14 @@ PIR_TEMPLATES: dict[str, list[tuple[str, frozenset[str]]]] = {
     "tool-discovery": [
         ("Which hostnames do installed passive discovery tools report?",
          frozenset({"discovery.subdomain"})),
+    ],
+    "whois-registration": [
+        ("What domain registration and lifecycle records are published in RDAP/WHOIS?",
+         frozenset({"whois.registrar", "whois.created", "whois.expires"})),
+    ],
+    "ip-infrastructure": [
+        ("What network ownership, open ports, CPEs, and CVEs are observed for this IP?",
+         frozenset({"host.port", "host.cpe", "host.vuln", "host.org", "host.network_name"})),
     ],
     "attack-surface": [
         (

@@ -12,7 +12,7 @@ from neesha.adapters import registry
 from neesha.db import schema
 from neesha.evidence.models import Evidence
 from neesha.guardrail.engine import Guardrail
-from neesha.harness.scoring import score_brief
+from neesha.harness.scoring import grade_brief_posture, score_brief
 from neesha.harness.graph import build_graph
 from neesha.harness.power_map import build_power_map
 
@@ -29,10 +29,13 @@ def build_brief(engine: sa.Engine, run_id: str, profile=None) -> dict:
         root = conn.execute(sa.select(schema.entity).where(
             schema.entity.c.id == run['company_id'])).mappings().one()
         company = root['canonical_name']
-        subject_kind = root['kind'] if root['kind'] in ('email', 'username') else 'company'
-        root_subject = subject_kind in ('email', 'username')
+        subject_kind = root['kind'] if root['kind'] in ('email', 'username', 'ip', 'phone', 'person') else 'company'
+        root_subject = subject_kind in ('email', 'username', 'ip', 'phone', 'person')
         from neesha.resolve.intake import resolve_seed
-        seed = resolve_seed(company, subject_kind if root_subject else 'domain')
+        try:
+            seed = resolve_seed(company, subject_kind if root_subject else 'domain')
+        except ValueError:
+            seed = resolve_seed(company, 'company')
         allowed_sensitivity = (sa.or_(
             schema.fact.c.sensitivity == 'business',
             sa.and_(schema.fact.c.sensitivity == 'personal',
@@ -131,9 +134,12 @@ def build_brief(engine: sa.Engine, run_id: str, profile=None) -> dict:
         for score in scores.values():
             score['configured'] = False
             score['explanation'] = f'Company service-fit and infrastructure-posture scoring do not apply to an independent {subject_kind} investigation.'
+    posture = grade_brief_posture(facts)
     return {
         'subject_kind': subject_kind, 'seed': seed,
         'scores': scores,
+        'posture': posture,
+        'exposures': posture['exposures'],
         'collection': collection,
         'graph': build_graph(company, facts, subject_kind=subject_kind),
         'power_map': build_power_map(facts) if not root_subject else [],
@@ -153,9 +159,45 @@ def write_brief(engine: sa.Engine, run_id: str, out: Path) -> tuple[Path, Path]:
     json_path = out / f'{run_id}.json'
     md_path = out / f'{run_id}.md'
     json_path.write_text(json.dumps(brief, indent=2, ensure_ascii=False) + '\n')
-    lines = [f"# NEESHA intelligence briefing: {brief['company']}", '',
-             f"Run: {run_id} | {brief['status']} ({brief['stop_reason']})", '',
-             '## Requirements', '']
+
+    posture = brief.get('posture') or {}
+    overall = posture.get('overall') or {'letter': 'N/A', 'score': None, 'rationale': 'Not assessed.'}
+    categories = posture.get('categories') or {}
+    exposures = brief.get('exposures') or []
+
+    lines = [
+        f"# Find3r intelligence briefing: {_literal(brief['company'])}",
+        '',
+        f"Run: {run_id} | {brief['status']} ({_literal(brief['stop_reason'])})",
+        f"Subject Kind: `{brief['subject_kind']}` | Exported Facts: **{len(brief['facts'])}** | Prioritized Exposures: **{len(exposures)}** | Overall Posture Grade: **{overall['letter']}** ({overall['score'] if overall['score'] is not None else 'N/A'})",
+        '',
+        '## Security Posture Assessment (A–F)',
+        '',
+        f"**Overall Grade: {overall['letter']}** ({overall['score'] if overall['score'] is not None else 'unscored'}) — {_literal(overall['rationale'])}",
+        '',
+        '| Security Domain | Grade | Score | Rationale |',
+        '| :--- | :---: | :---: | :--- |',
+    ]
+    for cat in categories.values():
+        sc = f"{cat['score']}/100" if cat.get('score') is not None else 'N/A'
+        lines.append(f"| {cat['label']} | **{cat['letter']}** | {sc} | {_literal(cat['rationale'])} |")
+
+    lines += ['', '## Prioritized Exposures & Remediation Roadmap', '']
+    if not exposures:
+        lines.append('No actionable security exposures triggered from observed facts in this run.')
+    else:
+        for exp in exposures:
+            lines += [
+                f"### [{exp['severity'].upper()}] {_literal(exp['title'])} ({exp['category']})",
+                f"- **Observed:** `{_literal(exp['observed'])}`",
+                f"- **Impact / Consequence:** {_literal(exp['consequence'])}",
+                f"- **Recommended Remediation:** {_literal(exp['remediation'])}",
+                f"- **Owner / Stakeholder:** {_literal(exp['stakeholder_function'])}",
+                f"- **Evidence IDs:** {', '.join(exp['evidence_ids']) or 'none'}",
+                '',
+            ]
+
+    lines += ['## Requirements', '']
     score_lines = ['', '## Explained scores', '']
     for key, label in [('commercial_fit', 'Commercial fit'),
                        ('security_needs', 'Evidence of potential security needs')]:
@@ -166,14 +208,12 @@ def write_brief(engine: sa.Engine, run_id: str, out: Path) -> tuple[Path, Path]:
         for criterion in score['criteria']:
             score_lines += [f"- {criterion['label']}: {criterion['status']}; weight {criterion['weight']}; contribution {criterion['contribution']}. "
                             f"Evidence: {', '.join(criterion['evidence_ids']) or 'none'}. {criterion['explanation']}"]
-    # Insert the score explanation before requirements, keeping the per-claim
-    # underlying records in the later observation sections.
     requirement_heading = lines.index('## Requirements')
     lines[requirement_heading:requirement_heading] = score_lines
     for requirement in brief['requirements']:
-        lines += [f"- {requirement['question']} — {requirement['status']}"]
+        lines += [f"- {_literal(requirement['question'])} — {requirement['status']}"]
         if requirement['gap_reason']:
-            lines += [f"  Gap: {requirement['gap_reason']}"]
+            lines += [f"  Gap: {_literal(requirement['gap_reason'])}"]
     for title, key in [('What we know', 'facts'), ('What we infer', 'inferences')]:
         lines += ['', f'## {title}', '']
         if not brief[key]:
@@ -186,7 +226,7 @@ def write_brief(engine: sa.Engine, run_id: str, out: Path) -> tuple[Path, Path]:
                       f"  Collected: {fact['collected_at']} | mode: {fact['collection_mode']}"]
     lines += ['', '## What we could not answer', '']
     gaps = [r for r in brief['requirements'] if r['status'] != 'answered']
-    lines += [f"- {r['question']}: {r['gap_reason'] or r['status']}" for r in gaps] or ['No recorded requirement gaps.']
-    lines += [f"- {s['adapter']}: {s['reason']}" for s in brief['skipped']]
+    lines += [f"- {_literal(r['question'])}: {_literal(r['gap_reason'] or r['status'])}" for r in gaps] or ['No recorded requirement gaps.']
+    lines += [f"- {_literal(s['adapter'])}: {_literal(s['reason'])}" for s in brief['skipped']]
     md_path.write_text('\n'.join(lines) + '\n')
     return md_path, json_path

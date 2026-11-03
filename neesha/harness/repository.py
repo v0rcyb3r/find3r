@@ -130,6 +130,45 @@ class Repository:
             ))
             return identity
 
+    @classmethod
+    def ensure_subject(cls, engine: sa.Engine, value: str, kind: str = "company") -> str:
+        """Find or create a root entity for any supported subject kind."""
+        if kind in ("company", "domain"):
+            return cls.ensure_company(engine, value)
+        if kind == "email":
+            return cls.ensure_email(engine, value)
+        if kind == "username":
+            return cls.ensure_username(engine, value)
+        from neesha.resolve.intake import resolve_seed
+
+        canonical = resolve_seed(value, kind)["normalized"]
+        with engine.begin() as conn:
+            existing = conn.execute(
+                sa.select(schema.entity.c.id).where(
+                    schema.entity.c.kind == kind,
+                    schema.entity.c.canonical_name == canonical,
+                    schema.entity.c.company_id.is_(None),
+                )
+            ).scalar()
+            if existing:
+                return existing
+            identity = _id()
+            now = _now()
+            conn.execute(
+                schema.entity.insert().values(
+                    id=identity,
+                    kind=kind,
+                    canonical_name=canonical,
+                    company_id=None,
+                    aliases=[canonical],
+                    confidence="high",
+                    resolved_by=f"{kind}-seed",
+                    first_seen_at=now,
+                    last_seen_at=now,
+                )
+            )
+            return identity
+
     def ensure_entity(self, conn, kind: str, name: str, identity_key: Optional[str] = None) -> str:
         """Find or create an entity inside this run's explicit research context.
 
@@ -137,21 +176,21 @@ class Repository:
         later run tell a still-present asset from a disappeared one.
         """
         canonical = name.strip().lower().rstrip(".")
-        # Names are display labels, not person identifiers. Anonymous drafts
-        # stay separate; only an explicit stable identifier can reuse a person.
         if kind == "person":
             canonical = identity_key or ("unresolved-observation:" + _id())
-        if self.subject_kind in ('email', 'username'):
-            if kind != self.subject_kind:
-                raise ValueError(f'{self.subject_kind}-root observations cannot manufacture other entities.')
-            from neesha.resolve.intake import resolve_seed
-            canonical = resolve_seed(name, self.subject_kind)['normalized']
-            root_name = conn.execute(sa.select(schema.entity.c.canonical_name).where(
-                schema.entity.c.id == self.company_id)).scalar_one()
-            if canonical != root_name:
-                raise ValueError(f'{self.subject_kind}-root observations must concern the exact seed {self.subject_kind}.')
-            return self.company_id
-        if kind == "company":
+        if self.subject_kind in ("email", "username", "ip", "phone"):
+            if kind == self.subject_kind:
+                from neesha.resolve.intake import resolve_seed
+
+                canonical = resolve_seed(name, self.subject_kind)["normalized"]
+                root_name = conn.execute(
+                    sa.select(schema.entity.c.canonical_name).where(
+                        schema.entity.c.id == self.company_id
+                    )
+                ).scalar_one()
+                if canonical == root_name:
+                    return self.company_id
+        if kind == "company" and self.subject_kind in ("company", "domain"):
             return self.company_id
 
         existing = conn.execute(

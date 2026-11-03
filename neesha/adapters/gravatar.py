@@ -63,7 +63,7 @@ class GravatarAdapter(BaseAdapter):
         accounts = data.get('verified_accounts', [])
         links = set()
         if not hidden and isinstance(accounts, list):
-            for account in accounts[:4]:
+            for account in accounts[:20]:
                 if not isinstance(account, dict) or account.get('is_hidden') is not False:
                     continue
                 link = account.get('url')
@@ -78,9 +78,10 @@ class GravatarAdapter(BaseAdapter):
                     continue
                 links.add(link)
         profile['linked_profile_urls'] = sorted(links)
-        name = data.get('display_name')
-        if isinstance(name, str) and name.strip():
-            profile['display_name'] = name.strip()[:200]
+        for field in ('display_name', 'job_title', 'company', 'description'):
+            val = data.get(field)
+            if isinstance(val, str) and val.strip():
+                profile[field] = val.strip()[:300]
         return result({'email': email, 'profile': profile}, reference, status)
 
     def parse(self, raw, request):
@@ -94,9 +95,10 @@ class GravatarAdapter(BaseAdapter):
         if not isinstance(profile, dict):
             raise AdapterError('Invalid Gravatar public metadata')
         facts = [fact(email, 'public.profile.gravatar.' + key, profile[key])
-                 for key in ('url', 'display_name') if isinstance(profile.get(key), str) and profile[key]]
+                 for key in ('url', 'display_name', 'job_title', 'company', 'description')
+                 if isinstance(profile.get(key), str) and profile[key]]
         links = profile.get('linked_profile_urls', [])
         if isinstance(links, list):
             facts += [fact(email, 'public.profile.gravatar.linked_profile_url', link)
-                      for link in links[:4] if isinstance(link, str) and link]
+                      for link in links[:20] if isinstance(link, str) and link]
         return facts

@@ -1,5 +1,3 @@
-"""Neesha — Network Exploration & Entity Signal Hunting Assistant.
-
-Open-source OSINT targeting for the cybersecurity sales cycle.
+"""Find3r — Open-source OSINT & Security Posture Intelligence Workbench.
 """
-__version__ = "0.1.0"
+__version__ = "0.2.0"

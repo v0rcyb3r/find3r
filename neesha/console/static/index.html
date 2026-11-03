@@ -2,50 +2,305 @@
 <html lang="en">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>NEESHA · Intelligence workspace</title><link rel="icon" href="data:,">
+  <title>Find3r · Intelligence Workspace</title><link rel="icon" href="data:,">
   <link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script>
 </head>
 <body>
-<aside class="rail">
-  <a class="brand" href="/" aria-label="NEESHA home"><span class="brand-symbol">N<span></span></span></a>
-  <button class="rail-button active" id="home" aria-label="Investigations" title="Investigations">▦</button>
-  <button class="rail-button" id="harness-nav" aria-label="Agent harness" title="Agent harness">≋</button>
-  <div class="rail-bottom"><span class="local-dot"></span><span class="rail-label">LOCAL</span></div>
+<aside class="rail" aria-label="Primary navigation">
+  <a class="brand" href="/" aria-label="Find3r home"><span class="brand-symbol"><span class="brand-dot"></span></span></a>
+  <button class="rail-button active" id="home" aria-label="Command Center & Investigations" aria-current="page" title="Command Center & Investigations">CMD</button>
+  <button class="rail-button" id="cloud-nav" aria-label="Ephemeral Vultr VPS Nodes" aria-current="false" title="Ephemeral Vultr VPS Nodes">VPS</button>
+  <button class="rail-button" id="harness-nav" aria-label="Agent Harness & AI Models" aria-current="false" title="Agent Harness & AI Models">AI</button>
+  <button class="rail-button" id="tools-nav" aria-label="OSINT Tools & Pre-Installers" aria-current="false" title="OSINT Tools & Pre-Installers">SRC</button>
+  <button class="rail-button" id="settings-nav" aria-label="Settings & API keys" title="Settings & API keys">CFG</button>
+  <div class="rail-bottom"><span class="local-dot"></span><span class="rail-label" id="rail-node-label">LOCAL</span></div>
 </aside>
 <div class="shell">
-<header><a class="wordmark" href="/">NEESHA<span>INTELLIGENCE SYSTEMS</span></a><div class="top-status"><span class="local-dot"></span> LOCAL WORKSPACE <span class="divider">/</span> <time id="clock">— UTC</time></div></header>
+<header>
+  <a class="wordmark" href="/">FIND3R<span>INTELLIGENCE SYSTEMS</span></a>
+  <div class="top-status">
+    <button type="button" class="tag operator-badge-btn" id="operator-login-btn" title="Operator Session &amp; Team Access">OPERATOR LOGIN · STAGED</button>
+    <span class="divider">/</span>
+    <button class="text-button" id="open-settings" type="button">API KEYS &amp; SETTINGS</button>
+    <span class="divider">/</span>
+    <span class="local-dot"></span> <span id="header-node-status">LOCAL WORKSPACE</span>
+  </div>
+</header>
 <main>
-  <div class="eyebrow breadcrumb">WORKSPACE <span>/</span> INVESTIGATIONS</div>
-  <section id="landing">
-    <div class="heading-row"><div><div class="eyebrow">CLARITY THROUGH EVIDENCE</div><h1>Evidence. Context.<br><span>A clearer picture.</span></h1><p class="intro">Investigate a company or an email address.<br>Keep the observation, its source, and the uncertainty together.</p></div><div class="process-index" aria-label="Investigation process"><div><span>01</span> COLLECT <small>Bounded public sources</small></div><div><span>02</span> VERIFY <small>Source records and citations</small></div><div><span>03</span> ANALYZE <small>Rules or selected models</small></div></div></div>
+  <nav class="workspace-nav" id="workspace-nav" aria-label="Workspace sections">
+    <button type="button" class="ws-tab active" data-ws-view="command" id="ws-tab-command">Command Workbench</button>
+    <button type="button" class="ws-tab" data-ws-view="cloud" id="ws-tab-cloud">Ephemeral VPS Nodes</button>
+    <button type="button" class="ws-tab" data-ws-view="harness" id="ws-tab-harness">Agent Harness</button>
+    <button type="button" class="ws-tab" data-ws-view="tools" id="ws-tab-tools">OSINT Tools &amp; Installers</button>
+  </nav>
+
+  <div id="ws-panel-command">
     <form id="investigate" class="investigation-box">
-      <div class="box-title"><span class="eyebrow">NEW INVESTIGATION</span><span class="tag">DOMAIN · WEBSITE · EMAIL</span></div>
-      <div class="search-row"><span class="search-icon" aria-hidden="true">⌕</span><input id="domain" name="domain" type="text" placeholder="Enter a domain, website, or email address" aria-label="Domain, website, or email address" required autocomplete="off" spellcheck="false"><button class="primary" id="launch" type="submit">Investigate <span>↗</span></button></div>
-      <div class="form-options"><label class="contact-option"><input id="website" type="checkbox" checked> Read public company website</label><label class="contact-option"><input id="contacts" type="checkbox"> Add paid company enrichment <span class="tag">OPTIONAL · $1 CAP</span></label></div>
-      <p id="seed-notice" class="notice" hidden>Email research is independent of a company. Domain mail configuration describes the provider, not the person’s security posture.</p>
-      <p id="form-message" class="form-message" role="status">Free sources run by default. Website reads are visible in the company’s logs.</p>
+      <div class="box-title">
+        <span class="eyebrow">TACTICAL OMNIBAR · LAUNCH INVESTIGATION</span>
+        <div class="kind-pills" id="kind-pills" role="group" aria-label="Quick select target kind">
+          <button type="button" class="kind-pill active" data-kind-val="auto">Auto</button>
+          <button type="button" class="kind-pill" data-kind-val="domain">Domain</button>
+          <button type="button" class="kind-pill" data-kind-val="email">Email</button>
+          <button type="button" class="kind-pill" data-kind-val="username">Username</button>
+          <button type="button" class="kind-pill" data-kind-val="ip">IP</button>
+          <button type="button" class="kind-pill" data-kind-val="phone">Phone</button>
+          <button type="button" class="kind-pill" data-kind-val="company">Company</button>
+          <button type="button" class="kind-pill" data-kind-val="person">Person</button>
+        </div>
+      </div>
+      <div class="search-row">
+        <input id="domain" name="domain" type="text" placeholder="Enter a domain (stripe.com), email (user@gmail.com), username, or IP address" aria-label="Target domain, website, email, username, or IP" required autocomplete="off" spellcheck="false">
+        <select id="seed-kind" aria-label="Target kind">
+          <option value="auto">Auto-detect kind</option>
+          <option value="domain">Domain / Website</option>
+          <option value="email">Email Address</option>
+          <option value="username">Username / Handle</option>
+          <option value="ip">IP Address</option>
+          <option value="phone">Phone Number</option>
+          <option value="company">Company Name</option>
+          <option value="person">Person Name</option>
+        </select>
+        <button class="primary" id="launch" type="submit">Investigate</button>
+      </div>
+      <div class="form-options">
+        <div class="export-actions">
+          <label class="contact-option"><input id="website" type="checkbox" checked> Inspect live website, TLS &amp; tech stack</label>
+          <label class="contact-option"><input id="contacts" type="checkbox"> Include metered APIs (Hunter / IntelX) <span class="tag">OPTIONAL · $1 CAP</span></label>
+        </div>
+        <div class="telemetry-strip">
+          <button type="button" class="telemetry-chip" id="chip-route" title="Click to configure Ephemeral Vultr VPS routing">ROUTE: LOCAL</button>
+          <button type="button" class="telemetry-chip" id="chip-mode" title="Click to configure Agent Harness">MODE: DETERMINISTIC</button>
+          <button type="button" class="telemetry-chip" id="chip-ollama" title="Click to manage Local Ollama AI models">LOCAL AI: LLAMA3.1:8B</button>
+          <button type="button" class="telemetry-chip" id="chip-tools" title="Click to manage OSINT CLI Tools &amp; Installers">SENSORS: READY</button>
+        </div>
+      </div>
+      <div id="live-scan-bar" class="live-scan-bar" hidden>
+        <div class="live-scan-track"><div id="live-scan-fill" class="live-scan-fill"></div></div>
+        <div id="live-sensor-matrix" class="live-sensor-matrix"></div>
+      </div>
+      <p id="seed-notice" class="notice" hidden>Personal/handle research runs exact-selector OSINT and account-presence checks independently of a company.</p>
+      <p id="form-message" class="form-message" role="status">Free sources run by default in parallel. Website reads are visible in the target’s HTTP logs.</p>
     </form>
-    <section class="harness-config" id="harness-config" aria-labelledby="harness-title">
-      <div class="harness-heading"><div><div class="eyebrow">EXECUTION CONTROL</div><h2 id="harness-title">Agent Harness</h2></div><span class="tag" id="harness-readiness">CHECKING PROVIDERS</span></div>
-      <p class="notice">Collection uses the source adapters. Optional models analyze the resulting evidence; they cannot browse, run tools, or change source records.</p>
-      <fieldset class="mode-switch"><legend class="sr-only">Analysis mode</legend><label><input type="radio" name="harness-mode" value="deterministic" checked><span>Deterministic<small>Collection + evidence rules · no model calls</small></span></label><label><input type="radio" name="harness-mode" value="single"><span>Single model<small>One cited synthesis · one model call</small></span></label><label><input type="radio" name="harness-mode" value="multi"><span>Multi-model<small>Two specialists + reviewer · up to three calls</small></span></label></fieldset>
-      <div id="harness-providers" class="provider-grid"></div><p id="harness-note" class="notice" role="status">Deterministic mode works without runtime API keys.</p><div id="harness-rollout" aria-live="polite"></div>
-    </section>
-    <details class="source-network"><summary><span>Collection network</span><span id="source-count" class="eyebrow">CHECKING SOURCES</span></summary><div id="source-catalog" class="source-grid"></div></details>
-    <div class="section-heading"><h2>Recent investigations <span id="run-count">00</span></h2><span class="eyebrow">LATEST ACTIVITY</span></div>
-    <div id="runs" class="runs"><div class="empty"><span class="empty-cross">＋</span><h3>A clear starting point.</h3><p>Your investigations will appear here.<br>Enter a domain or email above to begin.</p></div></div>
+
+    <div class="workbench-grid">
+      <aside class="workbench-dock" aria-label="Target history and active proxy dock">
+        <div class="dock-section">
+          <div class="dock-head">
+            <h2>Targets <span id="run-count">00</span></h2>
+            <span class="eyebrow">DOSSIER HISTORY</span>
+          </div>
+          <div class="run-filter-bar">
+            <input id="run-filter-input" class="filter-input run-filter-input" type="text" placeholder="Filter targets…" aria-label="Filter stored investigations" autocomplete="off" spellcheck="false">
+            <select id="run-kind-filter" class="run-kind-select" aria-label="Filter stored investigations by kind">
+              <option value="all">All kinds</option>
+              <option value="domain">Domain / Company</option>
+              <option value="email">Email</option>
+              <option value="username">Username</option>
+              <option value="ip">IP Address</option>
+              <option value="phone">Phone</option>
+              <option value="person">Person</option>
+            </select>
+          </div>
+          <div id="runs" class="runs">
+            <div class="empty"><h3>A clear starting point.</h3><p>Your investigations will appear here.<br>Enter a domain, email, username, or IP above to begin.</p></div>
+          </div>
+        </div>
+        <div class="dock-proxy-card" id="dock-proxy-card">
+          <div class="dock-head">
+            <span class="eyebrow">EXECUTION ROUTE</span>
+            <span class="tag" id="dock-proxy-badge">LOCAL</span>
+          </div>
+          <p class="notice" id="dock-proxy-status">Direct local execution. Spin up an ephemeral Ubuntu 24.04 VPS on Vultr to route OSINT scans through a disposable IP.</p>
+          <div class="export-actions">
+            <button type="button" class="secondary dock-btn" id="dock-open-cloud">Manage VPS Nodes</button>
+          </div>
+        </div>
+      </aside>
+
+      <div class="workbench-canvas">
+        <section id="landing">
+          <div class="heading-row compact-hero">
+            <div>
+              <div class="eyebrow">FIND3R · TACTICAL OSINT &amp; POSTURE WORKBENCH</div>
+              <h1>Evidence. Context.<br><span>A clearer picture.</span></h1>
+              <p class="intro">Investigate a domain, company, email address, username, IP, or phone.<br>Keep the observation, its source, A–F security posture grade, and uncertainty together.</p>
+            </div>
+            <div class="process-index" aria-label="Investigation process">
+              <div><span>01</span> COLLECT <small>Parallel OSINT &amp; posture sensors</small></div>
+              <div><span>02</span> GRADE <small>A–F security posture &amp; exposures</small></div>
+              <div><span>03</span> PIVOT <small>1-click selector pivot &amp; cited synthesis</small></div>
+            </div>
+          </div>
+          <div class="workbench-overview-cards">
+            <div class="posture-card">
+              <div class="posture-card-top"><h3>PARALLEL OSINT SENSORS</h3><span class="tag">24 ADAPTERS</span></div>
+              <p>DNS/DNSSEC, TLS certificates, HTTP headers, RDAP/WHOIS, Shodan InternetDB, passive DNS, Wayback, URLScan, Hunter, IntelX, Holehe, Sherlock, Maigret, Socialscan, Subfinder, Amass &amp; theHarvester.</p>
+            </div>
+            <div class="posture-card">
+              <div class="posture-card-top"><h3>EPHEMERAL VULTR CLOUD</h3><span class="tag">UBUNTU 24.04</span></div>
+              <p>Provision randomized, unattributable Ubuntu 24.04 LTS VPS nodes on Vultr API v2 to execute all 24 OSINT sensors remotely over SSH or share with teammates.</p>
+            </div>
+            <div class="posture-card">
+              <div class="posture-card-top"><h3>1-CLICK SELECTOR PIVOT</h3><span class="tag">INSPECTOR DRAWER</span></div>
+              <p>Click any Admiralty grade badge in a dossier to inspect the cryptographic SHA-256 source record and pivot into any discovered subdomain, IP, email, or handle in one click.</p>
+            </div>
+          </div>
+        </section>
+
+        <section id="detail" hidden>
+          <div class="detail-top-bar">
+            <button id="back" class="back" type="button">Overview Canvas</button>
+            <div class="export-actions">
+              <button class="secondary" id="pivot-current-btn" type="button">Re-Scan Target</button>
+              <button class="secondary" id="export-report" type="button">Export Dossier (.md)</button>
+              <button class="secondary" id="export" type="button">Export JSON</button>
+              <button class="danger-button" id="delete-run" type="button">Delete</button>
+            </div>
+          </div>
+          <div class="detail-heading">
+            <div>
+              <div class="eyebrow" id="subject-kind">COMPANY INTELLIGENCE</div>
+              <h1 id="company-title"></h1>
+              <p id="run-meta" class="mono muted"></p>
+            </div>
+          </div>
+          <div class="metrics" id="metrics"></div>
+          <div class="tabs" role="tablist" aria-label="Investigation views">
+            <button role="tab" aria-selected="true" data-tab="overview">Overview &amp; Posture</button>
+            <button role="tab" aria-selected="false" data-tab="infrastructure">Infrastructure</button>
+            <button role="tab" aria-selected="false" data-tab="people">People &amp; Footprint</button>
+            <button role="tab" aria-selected="false" data-tab="graph">Evidence Graph</button>
+            <button role="tab" aria-selected="false" data-tab="evidence">All Evidence</button>
+            <button role="tab" aria-selected="false" data-tab="analysis">Agent Harness</button>
+          </div>
+          <div id="view"></div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <section class="harness-config cloud-config" id="cloud-config" aria-labelledby="cloud-title" hidden>
+    <div class="harness-heading">
+      <div><div class="eyebrow">EPHEMERAL CLOUD INFRASTRUCTURE · VULTR API v2</div><h2 id="cloud-title">Ubuntu 24.04 VPS Execution Nodes</h2></div>
+      <div class="export-actions">
+        <span class="tag" id="cloud-active-badge">ROUTE: LOCAL MACHINE</span>
+        <select id="vps-region" class="region-select" aria-label="Vultr VPS Region"><option value="random">Random Global Region</option></select>
+        <button class="primary" id="spinup-vps-btn" type="button">Spin Up Random Ubuntu VPS</button>
+        <button class="secondary" id="rotate-vps-btn" type="button">Rotate VPS IP</button>
+        <button class="secondary" id="sync-vps-btn" type="button">Sync Nodes</button>
+        <button class="secondary" id="cloud-key-btn" type="button">Vultr Key</button>
+      </div>
+    </div>
+    <p class="notice" id="cloud-status-note">Spin up disposable Ubuntu 24.04 LTS servers in randomized Vultr regions with unattributable hostnames and pre-bootstrapped OSINT tools (`subfinder`, `holehe`, `socialscan`, `sherlock`, `maigret`, `theHarvester`). Select any active VPS below to route investigations through its IP over SSH, or copy the SSH command to share with coworkers.</p>
+    <div id="cloud-nodes" class="provider-grid"></div>
   </section>
-  <section id="detail" hidden>
-    <button id="back" class="back">← All investigations</button>
-    <div class="detail-heading"><div><div class="eyebrow" id="subject-kind">COMPANY INTELLIGENCE</div><h1 id="company-title"></h1><p id="run-meta" class="mono muted"></p></div><div class="export-actions"><button class="secondary" id="export-report">Export report ↓</button><button class="secondary" id="export">JSON ↓</button><button class="danger-button" id="delete-run">Delete investigation</button></div></div>
-    <div class="metrics" id="metrics"></div>
-    <div class="tabs" role="tablist" aria-label="Investigation views"><button role="tab" aria-selected="true" data-tab="overview">Overview</button><button role="tab" aria-selected="false" data-tab="infrastructure">Infrastructure</button><button role="tab" aria-selected="false" data-tab="people">People & roles</button><button role="tab" aria-selected="false" data-tab="graph">Evidence graph</button><button role="tab" aria-selected="false" data-tab="evidence">Evidence</button><button role="tab" aria-selected="false" data-tab="analysis">Agent Harness</button></div>
-    <div id="view"></div>
+
+  <section class="harness-config" id="harness-config" aria-labelledby="harness-title" hidden>
+    <div class="harness-heading"><div><div class="eyebrow">EXECUTION CONTROL</div><h2 id="harness-title">Agent Harness &amp; Local Ollama AI</h2></div><div class="export-actions"><span class="tag" id="harness-readiness">CHECKING PROVIDERS</span><button class="secondary" id="config-keys-btn" type="button">Configure Keys</button></div></div>
+    <p class="notice">Collection uses the source adapters. Optional cloud or local Ollama models analyze the resulting evidence; they cannot browse, run tools, or change source records.</p>
+    <fieldset class="mode-switch"><legend class="sr-only">Analysis mode</legend><label><input type="radio" name="harness-mode" value="deterministic" checked><span>Deterministic<small>Collection + evidence rules · no model calls</small></span></label><label><input type="radio" name="harness-mode" value="single"><span>Single model<small>One cited synthesis · cloud or local Ollama ($0)</small></span></label><label><input type="radio" name="harness-mode" value="multi"><span>Multi-model<small>Two specialists + reviewer · up to three models</small></span></label></fieldset>
+
+    <div class="ollama-box" id="ollama-panel">
+      <div class="harness-heading">
+        <div>
+          <div class="eyebrow">LOCAL AI ENGINE · OLLAMA (127.0.0.1:11434 · $0 COST · OFFLINE PRIVATE)</div>
+          <h3>Local Open-Weights &amp; Manually Installed Models</h3>
+        </div>
+        <div class="export-actions">
+          <span class="tag" id="ollama-status-badge">CHECKING OLLAMA</span>
+          <select id="ollama-model-select" class="region-select" aria-label="Select local Ollama model">
+            <option value="llama3.1:8b">Llama 3.1 8B · Balanced OSINT Synthesis (4.7 GB)</option>
+          </select>
+          <input id="ollama-custom-model" class="filter-input" type="text" placeholder="Or type manual/custom model tag (e.g. custom:latest)…" aria-label="Custom or manually installed Ollama model tag" autocomplete="off" spellcheck="false">
+          <button class="secondary" id="ollama-select-btn" type="button">Set Active Model</button>
+          <button class="primary" id="ollama-pull-btn" type="button">Pull / Download Model</button>
+          <button class="secondary" id="ollama-refresh-btn" type="button">Refresh Local Models</button>
+          <button class="secondary" id="ollama-install-btn" type="button">Install / Start Ollama</button>
+        </div>
+      </div>
+      <div class="ollama-import-bar">
+        <span class="eyebrow">IMPORT MANUAL MODEL (GGUF / MODELFILE)</span>
+        <input id="ollama-import-name" class="filter-input" type="text" placeholder="New model name (e.g. my-osint:latest)" aria-label="New custom Ollama model name" autocomplete="off" spellcheck="false">
+        <input id="ollama-import-source" class="filter-input" type="text" placeholder="Local .gguf path, Modelfile path, or base tag (e.g. ~/models/model.gguf)" aria-label="Local GGUF path, Modelfile path, or base model tag" autocomplete="off" spellcheck="false">
+        <button class="secondary" id="ollama-create-btn" type="button">Import / Build Model</button>
+      </div>
+      <p class="notice" id="ollama-status-note">Run cited OSINT synthesis locally on your machine using Ollama at $0 cost. Models you manually install via <code>ollama pull</code> or <code>ollama create</code> (GGUF / Modelfile) are auto-detected, or you can import a local <code>.gguf</code> / <code>Modelfile</code> directly above.</p>
+      <div id="ollama-providers" class="provider-grid"></div>
+    </div>
+
+    <div class="field-label">CLOUD RUNTIME LLM PROVIDERS (API KEY REQUIRED)</div>
+    <div id="harness-providers" class="provider-grid"></div><p id="harness-note" class="notice" role="status">Deterministic mode works without runtime API keys.</p><div id="harness-rollout" aria-live="polite"></div>
   </section>
-  <footer><span>NEESHA <span class="footer-slash">/</span> ANALYST WORKSPACE</span><span>EVIDENCE FIRST. INFERENCE LABELED.</span><span id="budget">LOCAL · PRIVATE</span></footer>
+
+  <section id="tools-config" hidden>
+    <details class="source-network" open><summary><span>Collection network, OSINT CLI Tools &amp; Ollama Download Kit</span><span id="source-count" class="eyebrow">CHECKING SOURCES</span></summary><div class="catalog-toolbar"><span class="tag" id="host-os-badge">HOST OS</span><button class="primary" type="button" id="autoinstall-tools-btn">Auto-Install Packages + Ollama (This OS)</button><button class="secondary" type="button" id="refresh-tools-btn">Refresh Tool Status</button><span class="divider">/</span><span class="eyebrow">PRE-INSTALL KIT (OSINT + OLLAMA):</span><button class="secondary" type="button" id="dl-win-installer">Windows (.ps1)</button><button class="secondary" type="button" id="dl-linux-installer">Linux / Ubuntu (.sh)</button><button class="secondary" type="button" id="dl-mac-installer">macOS (.sh)</button><span id="tool-install-status" class="mono muted"></span></div><div id="source-catalog" class="source-grid"></div></details>
+  </section>
+
+  <footer><span>FIND3R <span class="footer-slash">/</span> ANALYST WORKSPACE</span><span>EVIDENCE FIRST. INFERENCE LABELED.</span><span id="budget">LOCAL · PRIVATE</span></footer>
 </main>
 </div>
-<dialog id="source-dialog"><div class="dialog-head"><span class="eyebrow">SOURCE RECORD</span><button id="close-source" aria-label="Close source record">×</button></div><div id="source-content"></div></dialog>
-<dialog id="delete-dialog"><div class="dialog-head"><span class="eyebrow">DELETE STORED INVESTIGATION</span><button id="close-delete" aria-label="Cancel deletion">×</button></div><h2 id="delete-title"></h2><p class="notice">This deletes the selected investigation, matching caches, and NEESHA-managed reports. This action cannot be undone. Spent-budget totals remain. Independent backups and previously downloaded exports are not erased.</p><p id="delete-message" class="notice" role="status"></p><div class="export-actions"><button class="secondary" id="cancel-delete">Cancel</button><button class="danger-button" id="confirm-delete">Delete stored investigation</button></div></dialog>
+<dialog id="source-dialog" class="inspector-drawer"><div class="dialog-head"><span class="eyebrow">SOURCE INSPECTOR &amp; SELECTOR PIVOT</span><button id="close-source" aria-label="Close source record">Close</button></div><div id="source-content"></div></dialog>
+<dialog id="delete-dialog"><div class="dialog-head"><span class="eyebrow">DELETE STORED INVESTIGATION</span><button id="close-delete" aria-label="Cancel deletion">Close</button></div><h2 id="delete-title"></h2><p class="notice">This deletes the selected investigation, matching caches, and Find3r-managed reports. This action cannot be undone. Spent-budget totals remain. Independent backups and previously downloaded exports are not erased.</p><p id="delete-message" class="notice" role="status"></p><div class="export-actions"><button class="secondary" id="cancel-delete">Cancel</button><button class="danger-button" id="confirm-delete">Delete stored investigation</button></div></dialog>
+<dialog id="settings-dialog">
+  <div class="dialog-head"><span class="eyebrow">WORKSPACE CONFIGURATION · API KEYS, MODELS &amp; BUDGET</span><button id="close-settings" aria-label="Close settings">Close</button></div>
+  <form id="settings-form">
+    <p class="notice">Keys are stored locally in <code>config/runtime-settings.json</code> with owner-only permissions and never leave this machine except to their respective provider endpoints.</p>
+    <div class="settings-grid">
+      <div>
+        <span class="field-label">CLOUD INFRASTRUCTURE &amp; OSINT API KEYS</span>
+        <label class="setting-row"><span>Vultr Cloud API v2 Key <small id="status-VULTR_API_KEY"></small></span><input class="dialog-input" type="password" data-key="VULTR_API_KEY" placeholder="Enter VULTR_API_KEY for ephemeral Ubuntu VPS" autocomplete="off"></label>
+        <label class="setting-row"><span>Hunter.io API Key <small id="status-HUNTER_API_KEY"></small></span><input class="dialog-input" type="password" data-key="HUNTER_API_KEY" placeholder="Enter HUNTER_API_KEY (leave blank to keep)" autocomplete="off"></label>
+        <label class="setting-row"><span>EmailRep API Key <small id="status-EMAILREP_API_KEY"></small></span><input class="dialog-input" type="password" data-key="EMAILREP_API_KEY" placeholder="Enter EMAILREP_API_KEY (optional)" autocomplete="off"></label>
+        <label class="setting-row"><span>Intelligence X Key <small id="status-INTELX_API_KEY"></small></span><input class="dialog-input" type="password" data-key="INTELX_API_KEY" placeholder="Enter INTELX_API_KEY" autocomplete="off"></label>
+        <span class="field-label">MONTHLY BUDGET CAP (USD)</span>
+        <label class="setting-row"><span>Monthly Spend Cap ($ USD)</span><input class="dialog-input" type="number" step="1" min="0" max="100000" id="setting-budget" value="100"></label>
+      </div>
+      <div>
+        <span class="field-label">RUNTIME LLM PROVIDERS (API KEY &amp; MODEL)</span>
+        <div class="setting-row"><span>OpenAI <small id="status-OPENAI_API_KEY"></small></span><input class="dialog-input" type="password" data-key="OPENAI_API_KEY" placeholder="OPENAI_API_KEY (sk-...)" autocomplete="off"><input class="dialog-input model-input" type="text" data-model="openai" placeholder="Model (e.g. gpt-4o-mini)"></div>
+        <div class="setting-row"><span>Anthropic <small id="status-ANTHROPIC_API_KEY"></small></span><input class="dialog-input" type="password" data-key="ANTHROPIC_API_KEY" placeholder="ANTHROPIC_API_KEY (sk-ant-...)" autocomplete="off"><input class="dialog-input model-input" type="text" data-model="anthropic" placeholder="Model (e.g. claude-3-5-sonnet-latest)"></div>
+        <div class="setting-row"><span>Google Gemini <small id="status-GEMINI_API_KEY"></small></span><input class="dialog-input" type="password" data-key="GEMINI_API_KEY" placeholder="GEMINI_API_KEY" autocomplete="off"><input class="dialog-input model-input" type="text" data-model="google" placeholder="Model (e.g. gemini-2.5-flash)"></div>
+        <div class="setting-row"><span>DeepSeek <small id="status-DEEPSEEK_API_KEY"></small></span><input class="dialog-input" type="password" data-key="DEEPSEEK_API_KEY" placeholder="DEEPSEEK_API_KEY" autocomplete="off"><input class="dialog-input model-input" type="text" data-model="deepseek" placeholder="Model (e.g. deepseek-chat)"></div>
+        <div class="setting-row"><span>Local Ollama Model (No API Key Required · $0) <small id="status-OLLAMA_LOCAL">LOCAL</small></span><input class="dialog-input model-input" type="text" data-model="ollama" placeholder="Model tag (e.g. llama3.1:8b, qwen2.5:7b, deepseek-r1:8b)"></div>
+      </div>
+    </div>
+    <p id="settings-message" class="notice" role="status"></p>
+    <div class="export-actions">
+      <button class="secondary" type="button" id="load-default-profile">Load Default Commercial Fit Profile</button>
+      <button class="secondary" type="button" id="cancel-settings">Cancel</button>
+      <button class="primary" type="submit" id="save-settings">Save Configuration</button>
+    </div>
+  </form>
+</dialog>
+<dialog id="operator-dialog">
+  <div class="dialog-head"><span class="eyebrow">OPERATOR SESSION &amp; MULTI-ANALYST ACCESS</span><button id="close-operator" type="button" aria-label="Close operator dialog">Close</button></div>
+  <form id="operator-form">
+    <p class="notice">Find3r enforces per-session workspace tokens (<code>X-Workspace-Token</code>) and strict localhost origin gates. Multi-operator OIDC/SSO authentication is staged for team deployments.</p>
+    <div class="operator-status-grid">
+      <div class="posture-card">
+        <div class="eyebrow">SESSION AUTHENTICATION</div>
+        <strong id="operator-session-state" class="mono">ACTIVE · LOCAL TOKEN</strong>
+        <p class="notice">CSRF-guarded session token bound to this browser workspace.</p>
+      </div>
+      <div class="posture-card">
+        <div class="eyebrow">ACTIVE EXECUTION NODE</div>
+        <strong id="operator-node-state" class="mono">LOCAL WORKSPACE</strong>
+        <p class="notice">Shared Vultr Ubuntu 24.04 nodes can be accessed by teammates over SSH.</p>
+      </div>
+    </div>
+    <label class="setting-row">
+      <span>Active Operator Callsign / Analyst Tag <small id="operator-tag-status">ACTIVE</small></span>
+      <input class="dialog-input" type="text" id="operator-callsign" placeholder="e.g. operator-01 or analyst@team" value="local-analyst" autocomplete="off">
+    </label>
+    <p class="notice"><strong>Team Vultr VPS Sharing:</strong> Open the <em>Ephemeral VPS Nodes</em> tab, spin up a randomized Ubuntu 24.04 node, and click <strong>Copy SSH</strong> on any node card to share its <code>ssh -i ... root@&lt;ip&gt;</code> command with coworkers.</p>
+    <p id="operator-message" class="notice" role="status"></p>
+    <div class="export-actions">
+      <button class="secondary" type="button" id="operator-open-cloud">Manage Team VPS Nodes</button>
+      <button class="secondary" type="button" id="cancel-operator">Close</button>
+      <button class="primary" type="submit" id="save-operator">Apply Operator Tag</button>
+    </div>
+  </form>
+</dialog>
 </body>
 </html>

@@ -60,8 +60,9 @@ class IntelXAdapter(BaseAdapter):
     timeout: ClassVar[int] = 10
 
     def estimate_cost(self, request: Request) -> Cost:
+        raw_price = os.environ.get('INTELX_ESTIMATED_USD_PER_SEARCH', '0.05')
         try:
-            amount = Decimal(os.environ.get('INTELX_ESTIMATED_USD_PER_SEARCH', ''))
+            amount = Decimal(raw_price)
         except InvalidOperation:
             amount = Decimal('NaN')
         if not amount.is_finite() or not Decimal('0.0001') <= amount <= Decimal('1000000'):

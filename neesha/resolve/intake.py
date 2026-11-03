@@ -155,8 +155,8 @@ def resolve_seed(value, kind='auto') -> dict:
             address = ipaddress.ip_address(value)
         except ValueError as exc:
             raise ValueError('Enter a valid IPv4 or IPv6 address.') from exc
-        return _result('ip', address.compressed,
-            reason=('IP recognized; company association requires corroborating evidence. Shared infrastructure is not proof of ownership.'
+        return _result('ip', address.compressed, unresolved=False,
+            reason=('IP recognized for infrastructure & RDAP/Shodan research.'
                     if address.is_global else 'Non-public IP recognized; it does not identify a public company infrastructure owner.'))
     if kind == 'phone':
         if not _PHONE.fullmatch(value):
@@ -172,8 +172,8 @@ def resolve_seed(value, kind='auto') -> dict:
         if not 7 <= len(digits) <= 15:
             raise ValueError('Phone numbers must contain between 7 and 15 digits.')
         normalized = ('+' if value.startswith('+') else '') + digits
-        return _result('phone', normalized,
-            reason='Phone recognized; company association is unresolved. No country code or subscriber identity has been guessed.')
-    return _result(kind, ' '.join(value.split()),
-        reason=('Name is ambiguous; no person-versus-company classification or company match has been inferred.'
-                if kind == 'name' else f'{kind.capitalize()} name accepted as supplied; identity and company association require corroborating sources.'))
+        return _result('phone', normalized, unresolved=False,
+            reason='Phone number normalized for OSINT correlation.')
+    return _result(kind, ' '.join(value.split()), unresolved=(kind == 'name'),
+        reason=('Name is ambiguous; specify person, company, or username to disambiguate.'
+                if kind == 'name' else f'{kind.capitalize()} name accepted as a research subject.'))

@@ -24,7 +24,7 @@ db-down:
 	docker compose down
 
 migrate:
-	NEESHA_DATABASE_URL="postgresql+psycopg://neesha:$$(grep NEESHA_PG_PASSWORD .env | cut -d= -f2)@127.0.0.1:$${NEESHA_PG_PORT:-5433}/neesha" \
+	NEESHA_DATABASE_URL="$${NEESHA_DATABASE_URL:-sqlite:///./data/neesha.sqlite3}" \
 		.venv/bin/alembic upgrade head
 
 run:

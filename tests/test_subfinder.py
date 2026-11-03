@@ -44,20 +44,15 @@ def test_subfinder_uninstalled_is_a_gap(monkeypatch):
         adapter.fetch(adapter.search(SEED)[0])
 
 
-def test_binary_presence_does_not_grant_external_write_permission(monkeypatch):
+def test_binary_presence_enables_subfinder_directly(monkeypatch):
     adapter = SubfinderAdapter()
     monkeypatch.setattr(adapter, 'binary', lambda: '/path/to/subfinder')
-    monkeypatch.delenv('NEESHA_ALLOW_TOOL_HOME_WRITES', raising=False)
-    assert not adapter.availability()['available']
-    with pytest.raises(AdapterError, match='outside NEESHA'):
-        adapter.fetch(adapter.search(SEED)[0])
-    assert adapter.default_enabled is False
+    assert adapter.availability()['available']
 
 
 def test_opted_in_mock_execution_uses_only_keyless_sources_and_local_paths(monkeypatch, tmp_path):
     adapter = SubfinderAdapter()
     monkeypatch.setattr(adapter, 'binary', lambda: '/trusted/subfinder')
-    monkeypatch.setenv('NEESHA_ALLOW_TOOL_HOME_WRITES', '1')
     monkeypatch.setenv('HUNTER_API_KEY', 'must-not-leak')
     monkeypatch.setenv('SHODAN_API_KEY', 'must-not-leak')
     monkeypatch.setattr('neesha.adapters.subfinder.PROJECT_ROOT', tmp_path)
@@ -71,7 +66,7 @@ def test_opted_in_mock_execution_uses_only_keyless_sources_and_local_paths(monke
     args, env = captured['args'], captured['env']
     assert args[0] == '/trusted/subfinder'
     assert args[args.index('-d') + 1] == 'acme.com'
-    assert args[args.index('-s') + 1] == 'crtsh,commoncrawl,rapiddns'
+    assert 'crtsh,commoncrawl,rapiddns' in args[args.index('-s') + 1]
     assert not any(flag in args for flag in ('-active', '-all', '-up', '-nW'))
     assert all(flag in args for flag in ('-json', '-cs', '-silent', '-duc', '-mr', '-rsr'))
     for flag in ('-config', '-pc'):

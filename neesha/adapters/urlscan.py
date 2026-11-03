@@ -15,7 +15,10 @@ class UrlscanAdapter(BaseAdapter):
     description = 'Existing public urlscan hostname observations (search only)'
     source_type = 'osint'
     default_enabled = False
-    produces: ClassVar[frozenset[str]] = frozenset({'dns.subdomain', 'web.observed.url'})
+    produces: ClassVar[frozenset[str]] = frozenset({
+        'dns.subdomain', 'web.observed.url', 'dns.passive.ipv4', 'dns.passive.ipv6',
+        'tech.server', 'host.asn', 'host.asn_name', 'web.title',
+    })
 
     def search(self, request):
         return [Reference(url='https://urlscan.io/api/v1/search/?q='+quote('domain:'+request.value)+'&size=100',
@@ -63,7 +66,19 @@ class UrlscanAdapter(BaseAdapter):
             if host != domain and not host.endswith('.' + domain):
                 continue
             if host != domain:
-                found.add(('dns.subdomain', host))
+                found.add(('dns.subdomain', host, domain))
             # Query strings can contain session identifiers; retain only the public path.
-            found.add(('web.observed.url', parts._replace(query='', fragment='').geturl()))
-        return [FactDraft(attribute=a,value=v,entity_name=domain) for a,v in sorted(found)]
+            found.add(('web.observed.url', parts._replace(query='', fragment='').geturl(), domain))
+            for key, attr in (('server', 'tech.server'), ('asn', 'host.asn'), ('asnname', 'host.asn_name'), ('title', 'web.title')):
+                val = page.get(key)
+                if isinstance(val, str) and val.strip():
+                    found.add((attr, val.strip()[:300], host))
+            ip_val = page.get('ip')
+            if isinstance(ip_val, str) and ip_val.strip():
+                import ipaddress
+                try:
+                    ip_obj = ipaddress.ip_address(ip_val.strip())
+                    found.add((f'dns.passive.ipv{ip_obj.version}', str(ip_obj), host))
+                except ValueError:
+                    pass
+        return [FactDraft(attribute=a, value=v, entity_name=ent) for a, v, ent in sorted(found)]

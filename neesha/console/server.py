@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import os
 import secrets
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -25,6 +27,25 @@ from neesha.runtime.providers import provider_readiness
 from neesha.resolve.intake import resolve_seed
 
 STATIC = Path(__file__).parent / 'static'
+
+ALLOWED_SETTING_KEYS = (
+    'VULTR_API_KEY',
+    'HUNTER_API_KEY',
+    'EMAILREP_API_KEY',
+    'INTELX_API_KEY',
+    'OPENAI_API_KEY',
+    'ANTHROPIC_API_KEY',
+    'GEMINI_API_KEY',
+    'DEEPSEEK_API_KEY',
+)
+
+DEFAULT_MODELS = {
+    'openai': 'gpt-4o-mini',
+    'anthropic': 'claude-3-5-sonnet-latest',
+    'google': 'gemini-2.5-flash',
+    'deepseek': 'deepseek-chat',
+    'ollama': 'llama3.1:8b',
+}
 
 
 def canonical_domain(value: str) -> str:
@@ -60,15 +81,58 @@ def _aware(value):
 
 class Workspace:
     def __init__(self, engine: sa.Engine, sources: set[str] | None = None, profile_path: Path | None = None,
-                 reports_root: Path | None = None):
+                 reports_root: Path | None = None, settings_path: Path | None = None):
         self.engine = engine
         self.sources = sources
         self.profile_path = profile_path or (Path(__file__).resolve().parents[2] / "config" / "service-profile.json")
+        self.settings_path = settings_path or (self.profile_path.parent / "runtime-settings.json")
         self.reports_root = reports_root or (Path(__file__).resolve().parents[2] / 'reports')
         self.token = secrets.token_urlsafe(32)
         self.lock = threading.Lock()
         self.job = {'state': 'idle'}
         self.analyzing: set[str] = set()
+        self._catalog_cache: tuple[float, list[dict]] | None = None
+        self._load_saved_settings()
+        from neesha.cloud.vultr import VultrManager
+        self.vultr = VultrManager(self.profile_path.parent)
+
+    def _load_saved_settings(self):
+        if not self.settings_path.exists():
+            return
+        try:
+            data = json.loads(self.settings_path.read_text())
+            if not isinstance(data, dict):
+                return
+            for k, v in (data.get('keys') or {}).items():
+                if k in ALLOWED_SETTING_KEYS and isinstance(v, str) and v.strip():
+                    os.environ[k] = v.strip()
+            for p, m in (data.get('models') or {}).items():
+                if p in DEFAULT_MODELS and isinstance(m, str) and m.strip():
+                    os.environ[f'NEESHA_{p.upper()}_MODEL'] = m.strip()
+            for p, c in (data.get('call_caps') or {}).items():
+                if p in DEFAULT_MODELS and isinstance(c, str) and c.strip():
+                    os.environ[f'NEESHA_{p.upper()}_CALL_CAP_USD'] = c.strip()
+        except Exception:
+            pass
+
+    def _catalog(self, force: bool = False) -> list[dict]:
+        now = time.monotonic()
+        if not force and self._catalog_cache and (now - self._catalog_cache[0]) < 5.0:
+            return self._catalog_cache[1]
+        cat = registry.catalog()
+        self._catalog_cache = (now, cat)
+        return cat
+
+    def refresh_tools(self) -> dict:
+        cat = self._catalog(force=True)
+        return {'sources': cat, 'ready_count': sum(1 for s in cat if s.get('ready'))}
+
+    def install_tool(self, tool_name: str) -> dict:
+        from neesha.adapters.tool_installer import install_tool
+        result = install_tool(str(tool_name or '').strip())
+        self._catalog_cache = None
+        result['sources'] = self._catalog(force=True)
+        return result
 
     def snapshot(self):
         with self.engine.connect() as conn:
@@ -81,15 +145,157 @@ class Workspace:
         with self.lock:
             job = dict(self.job)
         budget = Ledger(self.engine).summary()
+        from neesha.adapters.tool_installer import detect_os_platform
+        from neesha.runtime.ollama import ollama_status
         return {
             'runs': [dict(r) for r in runs],
             'budget': {'cap': str(budget.cap_usd), 'committed': str(budget.committed_usd),
                        'remaining': str(budget.remaining_usd), 'period': budget.period},
             'job': job,
-            'sources': registry.catalog(),
+            'sources': self._catalog(),
             'runtime_providers': provider_readiness(),
+            'ollama': ollama_status(),
             'service_profile_configured': self.profile_path.exists(),
+            'cloud': self.vultr.list_nodes(sync_remote=False),
+            'host_os': detect_os_platform(),
         }
+
+    def settings(self) -> dict:
+        budget = Ledger(self.engine).summary()
+        keys_info = {}
+        for k in ALLOWED_SETTING_KEYS:
+            val = os.environ.get(k, '').strip()
+            keys_info[k] = {
+                'configured': bool(val),
+                'masked': ('••••' + val[-4:]) if len(val) > 4 else ('••••' if val else ''),
+            }
+        models_info = {
+            p: os.environ.get(f'NEESHA_{p.upper()}_MODEL', DEFAULT_MODELS[p])
+            for p in DEFAULT_MODELS
+        }
+        caps_info = {
+            p: os.environ.get(f'NEESHA_{p.upper()}_CALL_CAP_USD', '0.05')
+            for p in DEFAULT_MODELS
+        }
+        return {
+            'keys': keys_info,
+            'models': models_info,
+            'call_caps': caps_info,
+            'monthly_budget_usd': str(budget.cap_usd),
+        }
+
+    def select_ollama_model(self, model: str) -> dict:
+        from neesha.runtime.ollama import ollama_status, valid_ollama_model
+        cleaned = valid_ollama_model(model)
+        self.save_settings({'models': {'ollama': cleaned}})
+        return ollama_status()
+
+    def pull_ollama(self, model: str) -> dict:
+        from neesha.runtime.ollama import pull_ollama_model, valid_ollama_model
+        cleaned = valid_ollama_model(model)
+        status = pull_ollama_model(cleaned)
+        self.save_settings({'models': {'ollama': cleaned}})
+        return status
+
+    def create_ollama(self, name: str, source: str) -> dict:
+        from neesha.runtime.ollama import create_custom_ollama_model
+        status = create_custom_ollama_model(name, source)
+        self.save_settings({'models': {'ollama': status['selected_model']}})
+        return status
+
+    def install_ollama(self) -> dict:
+        from neesha.adapters.tool_installer import install_tool
+        from neesha.runtime.ollama import ensure_ollama_running, ollama_status
+        res = install_tool('ollama')
+        ensure_ollama_running(wait_seconds=3.0)
+        status = ollama_status()
+        status['install_result'] = res
+        return status
+
+    def save_settings(self, payload: dict) -> dict:
+        from neesha.config import harden_path
+        if not isinstance(payload, dict):
+            raise ValueError('Expected settings object.')
+        with self.lock:
+            existing = {}
+            if self.settings_path.exists():
+                try:
+                    existing = json.loads(self.settings_path.read_text())
+                    if not isinstance(existing, dict):
+                        existing = {}
+                except Exception:
+                    existing = {}
+            saved_keys = dict(existing.get('keys') or {})
+            saved_models = dict(existing.get('models') or {})
+            saved_caps = dict(existing.get('call_caps') or {})
+
+            if isinstance(payload.get('keys'), dict):
+                for k, v in payload['keys'].items():
+                    if k not in ALLOWED_SETTING_KEYS:
+                        continue
+                    if v is None or v == '':
+                        continue
+                    if not isinstance(v, str) or any(ch in v for ch in ('\r', '\n', ' ')):
+                        raise ValueError(f'Invalid format for {k}.')
+                    os.environ[k] = v.strip()
+                    saved_keys[k] = v.strip()
+                    # Populate default model and call cap when an LLM key is configured
+                    provider_map = {
+                        'OPENAI_API_KEY': 'openai',
+                        'ANTHROPIC_API_KEY': 'anthropic',
+                        'GEMINI_API_KEY': 'google',
+                        'DEEPSEEK_API_KEY': 'deepseek',
+                    }
+                    if k in provider_map:
+                        p = provider_map[k]
+                        if not os.environ.get(f'NEESHA_{p.upper()}_MODEL'):
+                            os.environ[f'NEESHA_{p.upper()}_MODEL'] = DEFAULT_MODELS[p]
+                            saved_models[p] = DEFAULT_MODELS[p]
+                        if not os.environ.get(f'NEESHA_{p.upper()}_CALL_CAP_USD'):
+                            os.environ[f'NEESHA_{p.upper()}_CALL_CAP_USD'] = '0.05'
+                            saved_caps[p] = '0.05'
+
+            if isinstance(payload.get('clear_keys'), list):
+                for k in payload['clear_keys']:
+                    if k in ALLOWED_SETTING_KEYS:
+                        os.environ.pop(k, None)
+                        saved_keys.pop(k, None)
+
+            if isinstance(payload.get('models'), dict):
+                for p, m in payload['models'].items():
+                    if p in DEFAULT_MODELS and isinstance(m, str) and m.strip():
+                        os.environ[f'NEESHA_{p.upper()}_MODEL'] = m.strip()
+                        saved_models[p] = m.strip()
+
+            if isinstance(payload.get('call_caps'), dict):
+                for p, c in payload['call_caps'].items():
+                    if p in DEFAULT_MODELS and c is not None and str(c).strip():
+                        val = Decimal(str(c).strip())
+                        if val <= 0 or val > Decimal('100'):
+                            raise ValueError(f'Call cap for {p} must be between 0.01 and 100.00 USD.')
+                        os.environ[f'NEESHA_{p.upper()}_CALL_CAP_USD'] = str(val)
+                        saved_caps[p] = str(val)
+
+            if payload.get('monthly_budget_usd') is not None and str(payload['monthly_budget_usd']).strip() != '':
+                cap_val = Decimal(str(payload['monthly_budget_usd']).strip())
+                if cap_val < 0 or cap_val > Decimal('100000'):
+                    raise ValueError('Monthly budget cap must be between 0 and 100000 USD.')
+                Ledger(self.engine).set_cap(cap_val)
+
+            self.settings_path.parent.mkdir(parents=True, exist_ok=True)
+            harden_path(self.settings_path.parent)
+            tmp = self.settings_path.with_suffix('.json.tmp')
+            fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+                fh.write(json.dumps({
+                    'keys': saved_keys,
+                    'models': saved_models,
+                    'call_caps': saved_caps,
+                }, indent=2) + '\n')
+            tmp.replace(self.settings_path)
+            harden_path(self.settings_path)
+            self._catalog_cache = None
+        return self.settings()
 
     def profile(self):
         if not self.profile_path.exists():
@@ -104,12 +310,15 @@ class Workspace:
             raise ValueError('Service profile is invalid; update it using the profile settings API.') from None
 
     def save_profile(self, payload):
+        from neesha.config import harden_path
         score_brief([], payload)
         self.profile_path.parent.mkdir(parents=True, exist_ok=True)
+        harden_path(self.profile_path.parent)
         with self.lock:
             temporary = self.profile_path.with_suffix('.json.tmp')
             temporary.write_text(json.dumps(payload, indent=2) + '\n')
             temporary.replace(self.profile_path)
+            harden_path(self.profile_path)
         return {'configured': True}
 
     def brief(self, run_id):
@@ -178,10 +387,20 @@ class Workspace:
 
     def launch(self, payload):
         seed = resolve_seed(payload.get('seed', payload.get('domain', '')), payload.get('kind', 'auto'))
-        is_email = seed['kind'] == 'email'
-        if seed['requires_resolution'] or (not is_email and not seed.get('domain')):
+        seed_kind = seed['kind']
+        if seed['requires_resolution']:
             raise ValueError(seed['reason'])
-        domain = seed['normalized'] if is_email else canonical_domain(seed['domain'])
+        if seed_kind in ('domain', 'website'):
+            if not seed.get('domain'):
+                raise ValueError(seed['reason'])
+            domain = canonical_domain(seed['domain'])
+            subject_kind = 'domain'
+        elif seed_kind in ('email', 'username', 'ip', 'phone', 'company', 'person'):
+            domain = seed['normalized']
+            subject_kind = seed_kind
+        else:
+            raise ValueError(seed['reason'])
+
         mode = payload.get('analysis_mode', 'deterministic')
         providers = payload.get('providers', [])
         if mode not in ('deterministic', 'single', 'multi'):
@@ -190,18 +409,23 @@ class Workspace:
             from neesha.runtime.investigation import analyze_brief
             # Empty facts validates configuration without a model call or charge.
             analyze_brief(self.engine, {'facts': []}, mode, providers)
-        # Public company research needs no setup ceremony. Persist a scoped
-        # research context for provenance; it grants no active techniques.
+
         now = datetime.now(timezone.utc)
         engagement_id = uuid4().hex
+        is_personal_kind = subject_kind in ('email', 'username')
+        techniques = frozenset({'account_enumeration'}) if is_personal_kind else frozenset()
         engagement = EngagementView(
-            id=engagement_id, authority_basis='public_research' if is_email else 'prospect_company',
-            authorized_domains=() if is_email else (domain,),
-            authorized_emails=(domain,) if is_email else (), permitted_techniques=frozenset(),
+            id=engagement_id,
+            authority_basis='public_research' if is_personal_kind else 'prospect_company',
+            authorized_domains=() if is_personal_kind else (domain,),
+            authorized_emails=(domain,) if subject_kind == 'email' else (),
+            authorized_usernames=(domain,) if subject_kind == 'username' else (),
+            permitted_techniques=techniques,
             starts_at=now, expires_at=now + timedelta(days=1),
         )
         contacts = payload.get('contacts') is True
         website = payload.get('website') is not False
+        run_id = uuid4().hex
         with self.lock:
             if self.job['state'] == 'running':
                 raise ValueError('An investigation is already running. Wait for it to finish.')
@@ -209,56 +433,99 @@ class Workspace:
                 conn.execute(schema.engagement.insert().values(
                     id=engagement_id, authority_basis=engagement.authority_basis,
                     authorized_domains=list(engagement.authorized_domains),
-                    authorized_emails=list(engagement.authorized_emails), permitted_techniques=[],
+                    authorized_emails=list(engagement.authorized_emails),
+                    authorized_usernames=list(engagement.authorized_usernames),
+                    permitted_techniques=list(engagement.permitted_techniques),
                     authorized_by='local-workspace:public-research',
                     starts_at=engagement.starts_at, expires_at=engagement.expires_at,
                     created_at=now,
                 ))
-            self.job = {'state': 'running', 'domain': domain, 'seed_kind': seed['kind'],
+            self.job = {'state': 'running', 'domain': domain, 'run_id': run_id,
+                        'seed_kind': seed_kind, 'subject_kind': subject_kind,
                         'seed_reason': seed['reason'], 'analysis_mode': mode}
         threading.Thread(target=self._run, args=(domain, engagement, contacts, website,
-                         'email' if is_email else 'domain', mode, providers), daemon=True).start()
-        return {'state': 'running', 'domain': domain}
+                         subject_kind, mode, providers, run_id), daemon=True).start()
+        return {'state': 'running', 'domain': domain, 'run_id': run_id, 'subject_kind': subject_kind}
 
     def _run(self, domain, engagement, contacts, website=True, subject_kind='domain',
-             analysis_mode='deterministic', providers=None):
+             analysis_mode='deterministic', providers=None, run_id=None):
         try:
-            ledger = Ledger(self.engine)
-            available = {s['name'] for s in registry.catalog()
-                         if s['integrated'] and s['ready'] and (s['tier'] == 'A' or (contacts and s['tier'] == 'B'))}
-            if not website:
-                available.discard('company-web')
-            if self.sources is not None:
-                available &= self.sources
-            available = {name for name in available if subject_kind in registry.get(name).accepts}
-
             def progress(update):
                 with self.lock:
                     self.job.update(update)
 
-            report = execute_run(
-                engine=self.engine, ledger=ledger, gate=PolicyGate(self.engine, ledger),
-                company=domain, engagement=engagement, analyst='local-workspace',
-                pir_templates=(('email-public-presence',) if subject_kind == 'email' else
-                    ('attack-surface', 'company-contacts', 'email-posture', 'public-history',
-                     'web-response', 'tool-discovery') + (('who-to-contact',) if contacts else ())),
-                tiers={'A', 'B'} if contacts else {'A'},
-                caps=RunCaps(max_steps=12, max_spend_usd=Decimal('1'), max_wall_secs=300),
-                sources=available, progress=progress, subject_kind=subject_kind,
-            )
-            job = {'state': 'complete', 'domain': domain, 'run_id': report.run_id,
-                   'analysis_mode': analysis_mode,
-                   'observations': report.facts_written,
-                   'sources_completed': len(report.steps),
-                   'sources_with_gaps': len(report.skipped)}
+            remote_node = self.vultr.get_active_remote_node() if self.sources is None else None
+            if remote_node is not None:
+                rem = self.vultr.execute_remote_investigation(
+                    engine=self.engine,
+                    node=remote_node,
+                    target=domain,
+                    subject_kind=subject_kind,
+                    engagement_id=engagement.id,
+                    run_id=run_id,
+                    contacts=contacts,
+                    website=website,
+                    progress_cb=progress,
+                )
+                job = {
+                    'state': 'complete',
+                    'domain': domain,
+                    'run_id': rem['run_id'],
+                    'subject_kind': subject_kind,
+                    'analysis_mode': analysis_mode,
+                    'observations': rem['facts_written'],
+                    'sources_completed': rem['steps_count'],
+                    'sources_with_gaps': rem['skipped_count'],
+                    'execution_node': f"{rem['node_ip']} ({rem['node_region']})",
+                }
+            else:
+                ledger = Ledger(self.engine)
+                allowed_tiers = {'A', 'B', 'C'} if contacts else {'A', 'C'}
+                available = {s['name'] for s in self._catalog()
+                             if s['integrated'] and s['ready'] and s['tier'] in allowed_tiers}
+                if not website:
+                    available.discard('company-web')
+                if self.sources is not None:
+                    available &= self.sources
+                available = {name for name in available if subject_kind in registry.get(name).accepts}
+
+                if subject_kind == 'email':
+                    pir_templates = ('email-public-presence', 'email-account-presence')
+                elif subject_kind == 'username':
+                    pir_templates = ('username-account-presence',)
+                elif subject_kind == 'ip':
+                    pir_templates = ('ip-infrastructure', 'whois-registration')
+                else:
+                    pir_templates = (
+                        'attack-surface', 'company-contacts', 'email-posture', 'public-history',
+                        'web-response', 'tool-discovery', 'whois-registration', 'ip-infrastructure',
+                    ) + (('who-to-contact',) if contacts else ())
+
+                report = execute_run(
+                    engine=self.engine, ledger=ledger, gate=PolicyGate(self.engine, ledger),
+                    company=domain, engagement=engagement, analyst='local-workspace',
+                    pir_templates=pir_templates,
+                    tiers=allowed_tiers,
+                    caps=RunCaps(max_steps=30, max_spend_usd=Decimal('1'), max_wall_secs=300),
+                    sources=available, progress=progress, subject_kind=subject_kind,
+                    run_id=run_id, parallel=(self.sources is None),
+                )
+                job = {'state': 'complete', 'domain': domain, 'run_id': report.run_id,
+                       'subject_kind': subject_kind,
+                       'analysis_mode': analysis_mode,
+                       'observations': report.facts_written,
+                       'sources_completed': len(report.steps),
+                       'sources_with_gaps': len(report.skipped)}
             if analysis_mode != 'deterministic':
-                progress({'phase': 'analysis', 'run_id': report.run_id})
+                progress({'phase': 'analysis', 'run_id': job['run_id']})
                 try:
-                    analysis = self.analyze(report.run_id, analysis_mode, providers)
+                    analysis = self.analyze(job['run_id'], analysis_mode, providers)
                     job['analysis_status'] = analysis['status']
                 except ValueError as exc:
                     job['analysis_status'] = 'failed'
                     job['analysis_error'] = str(exc)
+        except ValueError as exc:
+            job = {'state': 'failed', 'domain': domain, 'error': str(exc)}
         except Exception:
             # Provider exceptions may contain secrets: never return them to the browser.
             job = {'state': 'failed', 'domain': domain,
@@ -271,7 +538,12 @@ def make_handler(workspace: Workspace):
     class Handler(BaseHTTPRequestHandler):
         def _local_request(self):
             host = self.headers.get('Host', '')
-            return host in (f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}')
+            if host not in (f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}'):
+                return False
+            sec_fetch_site = (self.headers.get('Sec-Fetch-Site') or '').strip().lower()
+            if sec_fetch_site and sec_fetch_site not in ('same-origin', 'none'):
+                return False
+            return True
 
         def _send(self, status, body, content_type='application/json'):
             data = body if isinstance(body, bytes) else json.dumps(body, default=str).encode()
@@ -297,6 +569,8 @@ def make_handler(workspace: Workspace):
                 return self._send(200, (STATIC / filename).read_bytes(), mime)
             if path == '/api/session':
                 return self._send(200, {'token': workspace.token})
+            if path == '/api/settings':
+                return self._send(200, workspace.settings())
             if path == '/api/profile':
                 try:
                     return self._send(200, {'profile': workspace.profile()})
@@ -304,6 +578,16 @@ def make_handler(workspace: Workspace):
                     return self._send(400, {'error': str(exc)})
             if path == '/api/workspace':
                 return self._send(200, workspace.snapshot())
+            if path == '/api/ollama/status':
+                from neesha.runtime.ollama import ollama_status
+                return self._send(200, ollama_status())
+            if path == '/api/cloud/nodes':
+                return self._send(200, workspace.vultr.list_nodes(sync_remote=False))
+            if path.startswith('/api/tools/preinstall/'):
+                from neesha.adapters.tool_installer import generate_preinstall_script
+                target_os = path.removeprefix('/api/tools/preinstall/')
+                filename, content_type, script_body = generate_preinstall_script(target_os)
+                return self._send(200, {'filename': filename, 'content_type': content_type, 'script': script_body})
             if path.startswith('/api/runs/'):
                 run_id = path.removeprefix('/api/runs/')
                 if len(run_id) != 32 or any(c not in '0123456789abcdef' for c in run_id):
@@ -324,8 +608,20 @@ def make_handler(workspace: Workspace):
                 self.headers.get('X-Workspace-Token', ''), workspace.token
             ):
                 return self._send(403, {'error': 'Invalid workspace session.'})
-            analysis_path = self.path.startswith('/api/runs/') and self.path.endswith('/analysis')
-            if self.path not in ('/api/investigations', '/api/profile', '/api/resolve') and not analysis_path:
+            parsed_path = urlparse(self.path).path
+            path_parts = parsed_path.split('/')
+            analysis_path = (
+                len(path_parts) == 5
+                and path_parts[1:3] == ['api', 'runs']
+                and path_parts[4] == 'analysis'
+            )
+            allowed_posts = (
+                '/api/investigations', '/api/profile', '/api/resolve', '/api/settings',
+                '/api/tools/install', '/api/tools/refresh',
+                '/api/ollama/select', '/api/ollama/pull', '/api/ollama/create', '/api/ollama/install',
+                '/api/cloud/spinup', '/api/cloud/destroy', '/api/cloud/select', '/api/cloud/rotate', '/api/cloud/sync',
+            )
+            if parsed_path not in allowed_posts and not analysis_path:
                 return self._send(404, {'error': 'Not found.'})
             try:
                 length = int(self.headers.get('Content-Length', '0'))
@@ -334,18 +630,49 @@ def make_handler(workspace: Workspace):
                 payload = json.loads(self.rfile.read(length))
                 if not isinstance(payload, dict):
                     raise ValueError('Expected a JSON object.')
-                if self.path == '/api/resolve':
+                if parsed_path == '/api/resolve':
                     result = resolve_seed(payload.get('seed', ''), payload.get('kind', 'auto'))
-                elif self.path == '/api/profile':
+                elif parsed_path == '/api/profile':
                     result = workspace.save_profile(payload)
+                elif parsed_path == '/api/settings':
+                    result = workspace.save_settings(payload)
+                elif parsed_path == '/api/tools/refresh':
+                    result = workspace.refresh_tools()
+                elif parsed_path == '/api/tools/install':
+                    result = workspace.install_tool(payload.get('tool', 'all'))
+                elif parsed_path == '/api/ollama/select':
+                    result = workspace.select_ollama_model(str(payload.get('model', 'llama3.1:8b')))
+                elif parsed_path == '/api/ollama/pull':
+                    result = workspace.pull_ollama(str(payload.get('model', 'llama3.1:8b')))
+                elif parsed_path == '/api/ollama/create':
+                    result = workspace.create_ollama(
+                        str(payload.get('name', '')),
+                        str(payload.get('source', '')),
+                    )
+                elif parsed_path == '/api/ollama/install':
+                    result = workspace.install_ollama()
+                elif parsed_path == '/api/cloud/spinup':
+                    result = workspace.vultr.spin_up_node(
+                        region=str(payload.get('region', 'random')),
+                        plan=str(payload.get('plan', 'vc2-1c-2gb')),
+                        auto_select=bool(payload.get('auto_select', True)),
+                    )
+                elif parsed_path == '/api/cloud/destroy':
+                    result = workspace.vultr.destroy_node(str(payload.get('instance_id', '')))
+                elif parsed_path == '/api/cloud/select':
+                    result = workspace.vultr.select_node(str(payload.get('node_id', 'local')))
+                elif parsed_path == '/api/cloud/rotate':
+                    result = workspace.vultr.rotate_node(region=str(payload.get('region', 'random')))
+                elif parsed_path == '/api/cloud/sync':
+                    result = workspace.vultr.list_nodes(sync_remote=True)
                 elif analysis_path:
-                    run_id = self.path.split('/')[3]
+                    run_id = path_parts[3]
                     if len(run_id) != 32 or any(c not in '0123456789abcdef' for c in run_id):
                         raise ValueError('Invalid investigation ID.')
                     result = workspace.analyze(run_id, payload.get('mode'), payload.get('providers'))
                 else:
                     result = workspace.launch(payload)
-            except (ValueError, UnicodeError, sa.exc.NoResultFound) as exc:
+            except (ValueError, RuntimeError, UnicodeError, sa.exc.NoResultFound) as exc:
                 return self._send(400, {'error': str(exc)})
             return self._send(202, result)
 
@@ -378,14 +705,33 @@ def make_handler(workspace: Workspace):
 def serve(engine: sa.Engine, port: int = 8765):
     if not sa.inspect(engine).has_table('engagement'):
         raise ValueError('Initialize the harness database with alembic upgrade head first.')
+    # Terminate any stale NEESHA server process holding this port before binding.
+    import signal
+    import subprocess
+    try:
+        out = subprocess.check_output(['lsof', '-ti', f'tcp:{port}', '-sTCP:LISTEN'], text=True, stderr=subprocess.DEVNULL)
+        for line in out.splitlines():
+            pid = int(line.strip())
+            if pid != os.getpid():
+                cmd_out = subprocess.check_output(['ps', '-p', str(pid), '-o', 'command='], text=True, stderr=subprocess.DEVNULL)
+                if any(tok in cmd_out.lower() for tok in ('neesha', 'find3r')):
+                    os.kill(pid, signal.SIGTERM)
+        time.sleep(0.2)
+    except Exception:
+        pass
+    ledger = Ledger(engine)
+    if ledger.summary().cap_usd == 0:
+        ledger.set_cap(Decimal('100.00'))
     workspace = Workspace(engine)
     # Reports hold personal data and are not encrypted at rest: keep the tree
     # owner-only so other local users cannot read exported briefings.
     from neesha.config import harden_path
     if workspace.reports_root.exists():
         harden_path(workspace.reports_root)
+    cat = workspace._catalog(force=True)
+    ready_names = [s['name'] for s in cat if s.get('ready')]
     server = ThreadingHTTPServer(('127.0.0.1', port), make_handler(workspace))
-    print(f'NEESHA workspace: http://127.0.0.1:{server.server_port} (Ctrl-C to stop)')
+    print(f'Find3r workspace: http://127.0.0.1:{server.server_port} ({len(ready_names)}/{len(cat)} sources ready) (Ctrl-C to stop)', flush=True)
     try:
         server.serve_forever()
     finally:

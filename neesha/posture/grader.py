@@ -7,14 +7,15 @@ DNSSEC 15%.
 """
 from __future__ import annotations
 
-from neesha.posture.brief import Grade, Trigger
 from neesha.posture.facts import (
     DKIMResult,
     DMARCResult,
     DNSSECResult,
+    Grade,
     HTTPResult,
     SPFResult,
     TLSResult,
+    Trigger,
 )
 
 _DMARC_SCORE = {"reject": 100, "quarantine": 75, "none": 40}

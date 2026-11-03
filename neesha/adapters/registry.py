@@ -29,6 +29,13 @@ from neesha.adapters.holehe import HoleheAdapter
 from neesha.adapters.socialscan import SocialscanAdapter
 from neesha.adapters.sherlock import SherlockAdapter
 from neesha.adapters.maigret import MaigretAdapter
+from neesha.adapters.rdap import RdapAdapter
+from neesha.adapters.internetdb import InternetDbAdapter
+from neesha.adapters.hackertarget import HackerTargetAdapter
+from neesha.adapters.amass import AmassAdapter
+from neesha.adapters.email_osint import EmailOsintAdapter
+from neesha.adapters.username_osint import UsernameOsintAdapter
+from neesha.adapters.theharvester import TheHarvesterAdapter
 
 _REGISTERED: tuple[Type[BaseAdapter], ...] = (
     CrtShAdapter,
@@ -39,11 +46,18 @@ _REGISTERED: tuple[Type[BaseAdapter], ...] = (
     WaybackAdapter,
     UrlscanAdapter,
     SubfinderAdapter,
+    AmassAdapter,
+    TheHarvesterAdapter,
+    RdapAdapter,
+    InternetDbAdapter,
+    HackerTargetAdapter,
     IntelXAdapter,
     DeHashedAdapter,
     GitHubEmailAdapter,
     GravatarAdapter,
     EmailRepAdapter,
+    EmailOsintAdapter,
+    UsernameOsintAdapter,
     HoleheAdapter,
     SocialscanAdapter,
     SherlockAdapter,
@@ -98,8 +112,9 @@ def produced_attributes(tiers: Optional[set[str]] = None, sources: Optional[set[
 def catalog() -> list[dict]:
     """Configured capabilities, not a claim that external providers are healthy."""
     import os
-    import shutil
+    from neesha.adapters.tool_installer import INSTALLABLE_TOOLS, ensure_tool_paths_in_env
 
+    ensure_tool_paths_in_env()
     rows = []
     for cls in ADAPTERS.values():
         ready, reason = True, 'Available; provider availability and rate limits can vary.'
@@ -108,21 +123,15 @@ def catalog() -> list[dict]:
         if hasattr(cls, 'availability'):
             availability = cls().availability()
             ready, reason = availability['available'], availability['reason']
+        installable = cls.name in INSTALLABLE_TOOLS
+        bin_path = cls.binary() if hasattr(cls, 'binary') and callable(getattr(cls, 'binary')) else None
+        state = 'available' if ready else ('not installed' if installable else 'not configured')
         rows.append({'name': cls.name, 'description': cls.description,
                      'accepts': sorted(cls.accepts),
                      'tier': cls.tier, 'mode': cls.collection_mode, 'ready': ready,
-                     'state': 'available' if ready else 'not configured', 'reason': reason,
+                     'available': ready,
+                     'installable': installable,
+                     'binary_path': bin_path,
+                     'state': state, 'reason': reason,
                      'integrated': bool(cls.produces)})
-    for name, binary, reason in (
-        ('theHarvester', 'theHarvester', 'Installed tool needs an isolated runner before integration; defaults write outside NEESHA.'),
-        ('Amass', 'amass', 'Installed binary needs compatibility and passive-mode validation.'),
-        ('SpiderFoot', 'spiderfoot', 'Requires a curated module runner; not integrated.'),
-        ('BBOT', 'bbot', 'Requires a curated passive module runner; not integrated.'),
-        ('Recon-ng', 'recon-ng', 'Module-level integration is not implemented.'),
-    ):
-        installed = shutil.which(binary) is not None
-        rows.append({'name': name, 'description': reason, 'tier': 'A',
-                     'mode': 'module-dependent', 'ready': False, 'integrated': False,
-                     'state': 'installed · not connected' if installed else 'not installed',
-                     'reason': reason})
     return rows

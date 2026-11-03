@@ -12,6 +12,8 @@ log lines.
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -82,6 +84,8 @@ def execute_run(
     progress: Optional[Callable[[dict], None]] = None,
     subject_kind: str = "domain",
     approve: Optional[set[str]] = None,
+    run_id: Optional[str] = None,
+    parallel: bool = False,
 ) -> RunReport:
     """Run one cycle and return what it learned and what it did not.
 
@@ -94,13 +98,17 @@ def execute_run(
     )
 
     # Validate direction before creating a run that could be left running.
-    _DEFAULT_PIR = {'email': 'email-public-presence', 'username': 'username-account-presence'}
+    _DEFAULT_PIR = {
+        'email': 'email-public-presence',
+        'username': 'username-account-presence',
+        'ip': 'ip-infrastructure',
+    }
     if subject_kind in _DEFAULT_PIR and tuple(pir_templates) == ('attack-surface',):
         pir_templates = (_DEFAULT_PIR[subject_kind],)
     pirs = expand_templates(pir_templates)
-    if subject_kind not in ('domain', 'company', 'email', 'username'):
-        raise ValueError('Only domain/company, exact-email, and username runs are connected.')
-    if subject_kind in ('email', 'username'):
+    if subject_kind not in ('domain', 'company', 'email', 'username', 'ip', 'phone', 'person'):
+        raise ValueError(f'Unsupported subject_kind: {subject_kind}')
+    if subject_kind in ('email', 'username', 'ip', 'phone'):
         from neesha.resolve.intake import resolve_seed
         company = resolve_seed(company, subject_kind)['normalized']
     plan = build_plan(pirs, company, entity_kind=subject_kind, tiers=tiers, sources=sources)
@@ -109,9 +117,11 @@ def execute_run(
         company_id = Repository.ensure_email(engine, company)
     elif subject_kind == 'username':
         company_id = Repository.ensure_username(engine, company)
+    elif subject_kind in ('ip', 'phone', 'person'):
+        company_id = Repository.ensure_subject(engine, company, subject_kind)
     else:
         company_id = Repository.ensure_company(engine, company)
-    run_id = uuid4().hex
+    run_id = run_id or uuid4().hex
     started = _now()
     monotonic_start = time.monotonic()
 
@@ -147,53 +157,110 @@ def execute_run(
     approve = approve or set()
 
     try:
-        for step in plan.steps:
-            elapsed = time.monotonic() - monotonic_start
-            halt = _stop_condition(state, caps, elapsed)
-            if halt:
-                stop_reason = halt
-                # Everything from here on is explicitly unrun, with a reason.
-                skipped.extend(
-                    {"adapter": s.adapter_name, "reason": halt}
-                    for s in plan.steps[plan.steps.index(step) :]
-                )
-                break
+        if parallel and len(plan.steps) > 1 and caps.max_steps >= len(plan.steps):
+            progress_lock = threading.Lock()
+            active_sources: set[str] = set()
+            results_by_idx: dict[int, StepResult] = {}
 
-            adapter = (
-                adapters.get(step.adapter_name)
-                if adapters
-                else registry.build(step.adapter_name)
-            )
-            if adapter is None:
-                skipped.append(
-                    {"adapter": step.adapter_name, "reason": "adapter unavailable"}
+            def _run_step(idx: int, step):
+                adapter = (
+                    adapters.get(step.adapter_name)
+                    if adapters
+                    else registry.build(step.adapter_name)
                 )
-                continue
+                if adapter is None:
+                    with progress_lock:
+                        skipped.append({"adapter": step.adapter_name, "reason": "adapter unavailable"})
+                    return
+                with progress_lock:
+                    active_sources.add(step.adapter_name)
+                    if progress:
+                        progress({
+                            "current_source": ", ".join(sorted(active_sources)),
+                            "completed": len(results_by_idx),
+                            "total": len(plan.steps),
+                        })
+                elapsed = time.monotonic() - monotonic_start
+                res = executor.execute(
+                    adapter,
+                    step.request,
+                    state=RunState(steps_used=0, spend_used=Decimal("0"), elapsed_secs=elapsed),
+                    approved=step.adapter_name in approve,
+                )
+                with progress_lock:
+                    active_sources.discard(step.adapter_name)
+                    results_by_idx[idx] = res
+                    if not res.productive:
+                        skipped.append({"adapter": res.adapter, "reason": res.reason})
+                    if progress:
+                        progress({
+                            "current_source": ", ".join(sorted(active_sources)) or step.adapter_name,
+                            "completed": len(results_by_idx),
+                            "total": len(plan.steps),
+                            "last_outcome": res.outcome,
+                        })
 
-            if progress:
-                progress({"current_source": step.adapter_name, "completed": len(steps),
-                          "total": len(plan.steps)})
-            result = executor.execute(
-                adapter,
-                step.request,
-                state=RunState(
-                    steps_used=state.steps_used,
-                    spend_used=state.spend_used,
-                    elapsed_secs=elapsed,
-                ),
-                approved=step.adapter_name in approve,
-            )
-            steps.append(result)
-            if progress:
-                progress({"current_source": step.adapter_name, "completed": len(steps),
-                          "total": len(plan.steps), "last_outcome": result.outcome})
-            state = RunState(
-                steps_used=state.steps_used + 1,
-                spend_used=state.spend_used + result.cost_usd,
-                elapsed_secs=time.monotonic() - monotonic_start,
-            )
-            if not result.productive:
-                skipped.append({"adapter": result.adapter, "reason": result.reason})
+            with ThreadPoolExecutor(max_workers=min(6, len(plan.steps))) as pool:
+                futures = [pool.submit(_run_step, i, st) for i, st in enumerate(plan.steps)]
+                for fut in as_completed(futures):
+                    fut.result()
+
+            for i in sorted(results_by_idx):
+                res = results_by_idx[i]
+                steps.append(res)
+                state = RunState(
+                    steps_used=state.steps_used + 1,
+                    spend_used=state.spend_used + res.cost_usd,
+                    elapsed_secs=time.monotonic() - monotonic_start,
+                )
+        else:
+            for step in plan.steps:
+                elapsed = time.monotonic() - monotonic_start
+                halt = _stop_condition(state, caps, elapsed)
+                if halt:
+                    stop_reason = halt
+                    # Everything from here on is explicitly unrun, with a reason.
+                    skipped.extend(
+                        {"adapter": s.adapter_name, "reason": halt}
+                        for s in plan.steps[plan.steps.index(step) :]
+                    )
+                    break
+
+                adapter = (
+                    adapters.get(step.adapter_name)
+                    if adapters
+                    else registry.build(step.adapter_name)
+                )
+                if adapter is None:
+                    skipped.append(
+                        {"adapter": step.adapter_name, "reason": "adapter unavailable"}
+                    )
+                    continue
+
+                if progress:
+                    progress({"current_source": step.adapter_name, "completed": len(steps),
+                              "total": len(plan.steps)})
+                result = executor.execute(
+                    adapter,
+                    step.request,
+                    state=RunState(
+                        steps_used=state.steps_used,
+                        spend_used=state.spend_used,
+                        elapsed_secs=elapsed,
+                    ),
+                    approved=step.adapter_name in approve,
+                )
+                steps.append(result)
+                if progress:
+                    progress({"current_source": step.adapter_name, "completed": len(steps),
+                              "total": len(plan.steps), "last_outcome": result.outcome})
+                state = RunState(
+                    steps_used=state.steps_used + 1,
+                    spend_used=state.spend_used + result.cost_usd,
+                    elapsed_secs=time.monotonic() - monotonic_start,
+                )
+                if not result.productive:
+                    skipped.append({"adapter": result.adapter, "reason": result.reason})
     except Exception:
         # A crash mid-loop must not leave the run wedged at "running" forever.
         # Record the failure so an operator can see it and so deletion is not

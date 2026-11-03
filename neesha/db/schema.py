@@ -40,7 +40,20 @@ def _money(name: str, **kw) -> sa.Column:
 
 # Vocabularies. Kept here so the CHECK constraints and the application agree
 # on one definition rather than drifting apart.
-ENTITY_KINDS = ("company", "domain", "host", "service", "person", "vendor", "email", "username")
+ENTITY_KINDS = (
+    "company",
+    "domain",
+    "host",
+    "service",
+    "person",
+    "vendor",
+    "email",
+    "username",
+    "ip",
+    "phone",
+    "account",
+    "url",
+)
 CONFIDENCES = ("high", "medium", "low", "unknown")
 SENSITIVITIES = ("business", "personal", "restricted")
 COLLECTION_MODES = ("third_party_passive", "direct_contact", "active")
@@ -68,6 +81,7 @@ LEDGER_STATES = ("reserved", "settled", "released")
 RELATIONSHIP_KINDS = (
     "subdomain_of",
     "resolves_to",
+    "resolved_to",
     "runs_service",
     "employee_of",
     "reports_to",
@@ -75,6 +89,26 @@ RELATIONSHIP_KINDS = (
     "influences",
     "incumbent_vendor_of",
     "same_as",
+    "account_observed",
+    "public_provider_metadata",
+    "published_role",
+    "historical_dns",
+    "published_business_email",
+    "published_business_phone",
+    "archived_url",
+    "observed_url",
+    "uses_ip",
+    "uses_phone",
+    "associated_with",
+    "handle_correlation",
+    "mail_exchange",
+    "reverse_dns",
+    "registered_to",
+    "observed",
+    "department",
+    "social_profile",
+    "social_account",
+    "host_telemetry",
 )
 
 
@@ -181,7 +215,7 @@ entity = sa.Table(
     # Company-linked kinds retain their research context. An exact email root
     # may stand alone without manufacturing a company or a named person.
     sa.CheckConstraint(
-        "kind IN ('company', 'email', 'username') OR company_id IS NOT NULL",
+        "kind IN ('company', 'domain', 'email', 'username', 'person', 'ip', 'phone') OR company_id IS NOT NULL",
         name="ck_entity_company_first",
     ),
     sa.UniqueConstraint(
@@ -278,7 +312,7 @@ relationship = sa.Table(
     sa.Column(
         "target_entity_id", sa.String(32), sa.ForeignKey("entity.id"), nullable=False
     ),
-    sa.Column("kind", sa.String(24), nullable=False),
+    sa.Column("kind", sa.String(48), nullable=False),
     sa.Column("confidence", sa.String(8), nullable=False),
     sa.Column("is_inference", sa.Boolean, nullable=False, server_default=sa.text("false")),
     # How the edge was derived, e.g. 'title-parse-v1'. A power-map edge the

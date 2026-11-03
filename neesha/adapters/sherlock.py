@@ -15,7 +15,7 @@ from neesha.adapters.base import FactDraft, RawResult, Reference, Request
 
 
 def parse_found_sites(output: bytes, max_services: int) -> list[str]:
-    """Site names from '[+] Site: url' / '[+] Site' lines; nothing else kept."""
+    """Site names from '[+] Site: url' / '[+] Site' lines."""
     found = []
     for raw_line in output.decode("utf-8", errors="replace").splitlines():
         line = raw_line.strip()
@@ -30,10 +30,26 @@ def parse_found_sites(output: bytes, max_services: int) -> list[str]:
     return found
 
 
+def parse_found_urls(output: bytes, max_services: int) -> list[str]:
+    """Profile URLs from '[+] Site: https://...' lines."""
+    urls = []
+    for raw_line in output.decode("utf-8", errors="replace").splitlines():
+        line = raw_line.strip()
+        if not line.startswith("[+]") or ":" not in line:
+            continue
+        _, candidate = line[3:].split(":", 1)
+        url = candidate.strip().split()[0] if candidate.strip() else ""
+        if url.startswith(("http://", "https://")) and len(url) <= 2048:
+            urls.append(url)
+        if len(urls) >= max_services:
+            break
+    return urls
+
+
 class SherlockAdapter(AccountEnumAdapter):
     name: ClassVar[str] = "sherlock"
     binary_name: ClassVar[str] = "sherlock"
-    description: ClassVar[str] = "Username account enumeration via Sherlock (client engagement only)"
+    description: ClassVar[str] = "Username account enumeration via Sherlock"
     produces: ClassVar[frozenset[str]] = frozenset({"public.account"})
     accepts: ClassVar[frozenset[str]] = frozenset({"username"})
     subject_entity_kind: ClassVar[str] = "username"
@@ -41,12 +57,15 @@ class SherlockAdapter(AccountEnumAdapter):
     def fetch(self, reference: Reference) -> RawResult:
         subject = normalize_subject("username", reference.label)
         with self._temp_cwd() as cwd:
-            # --no-txt: do not persist a report; we parse --print-found stdout.
-            # The throwaway cwd catches any stray write and is then removed.
             args = [self.binary(), "--print-found", "--no-color", "--no-txt",
                     "--timeout", "10", subject]
             output = self._run(args, cwd)
-        return self._sanitized(subject, parse_found_sites(output, self.max_services), reference)
+        return self._sanitized(
+            subject,
+            parse_found_sites(output, self.max_services),
+            reference,
+            found_urls=parse_found_urls(output, self.max_services),
+        )
 
     def parse(self, raw: RawResult, request: Request) -> list[FactDraft]:
         return super().parse(raw, request)

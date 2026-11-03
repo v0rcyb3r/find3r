@@ -22,15 +22,17 @@ def test_dns_fetch_queries_expected_records_and_preserves_success(monkeypatch):
             return QueryResult(name,rtype,'system','ok',[Record(rtype,'203.0.113.10')])
         return QueryResult(name,rtype,'system','noerror-nodata')
     monkeypatch.setattr('neesha.adapters.dns_posture.SystemResolver.query',query)
+    monkeypatch.setattr('neesha.collectors.network.get_tls_cert', lambda *a, **kw: type('T', (), {'connected': False})())
     adapter=DnsPostureAdapter()
     request=Request('domain','acme.com')
     facts=adapter.parse(adapter.fetch(adapter.search(request)[0]),request)
-    assert calls==[('acme.com',t) for t in ('A','AAAA','MX','NS','CAA','TXT')]+[('_dmarc.acme.com','TXT')]
+    assert calls[:7]==[('acme.com',t) for t in ('A','AAAA','MX','NS','CAA','TXT')]+[('_dmarc.acme.com','TXT')]
     # The A success is preserved; an authoritative noerror-nodata for the apex
     # TXT and _dmarc records is an observed absence of SPF/DMARC.
     assert {(f.attribute,f.value) for f in facts}=={
         ('dns.a','203.0.113.10'),
-        ('email.spf.qualifier','absent'),('email.dmarc.policy','absent')}
+        ('email.spf.qualifier','absent'),('email.dmarc.policy','absent'),
+        ('dnssec.status','absent'),('email.mtasts.present','absent')}
 
 
 def test_dns_nodata_on_an_existing_domain_is_observed_absence(monkeypatch):
@@ -109,7 +111,8 @@ def test_dns_txt_parses_valid_spf_dmarc_and_ignores_wrong_subject_or_failed_rows
     ]),Request('domain','acme.com'))
     assert {(f.attribute,f.value) for f in facts}=={
         ('email.spf.record','v=spf1 include:mail.example -all'),('email.spf.qualifier','-all'),
-        ('email.dmarc.record','v=DMARC1; p=reject; rua=mailto:dmarc@acme.com'),('email.dmarc.policy','reject')}
+        ('email.dmarc.record','v=DMARC1; p=reject; rua=mailto:dmarc@acme.com'),
+        ('email.dmarc.policy','reject'),('email.dmarc.rua','mailto:dmarc@acme.com')}
 
 
 @pytest.mark.parametrize('payload',[b'not-json',b'{}',b'null'])

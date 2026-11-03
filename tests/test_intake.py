@@ -50,12 +50,12 @@ def test_auto_names_remain_ambiguous(value):
     assert not result['candidate_domains']
 
 
-@pytest.mark.parametrize('kind',['person','company','name'])
-def test_explicit_name_types_are_preserved_but_not_resolved(kind):
+@pytest.mark.parametrize('kind,expected_unresolved',[('person',False),('company',False),('name',True)])
+def test_explicit_name_types_are_runnable_while_bare_name_needs_type(kind,expected_unresolved):
     result=resolve_seed('  Dana   Ops  ',kind)
     assert result['kind']==kind
     assert result['normalized']=='Dana Ops'
-    assert result['requires_resolution'] is True
+    assert result['requires_resolution'] is expected_unresolved
 
 
 @pytest.mark.parametrize('value,normalized',[
@@ -66,17 +66,17 @@ def test_ips_are_recognized_without_company_ownership(value,normalized):
     result=resolve_seed(value)
     assert result['kind']=='ip'
     assert result['normalized']==normalized
-    assert result['requires_resolution'] is True
+    assert result['requires_resolution'] is False
     assert result['domain'] is None
 
 
 @pytest.mark.parametrize('value,normalized',[('+1 (212) 555-0199','+12125550199'),('212-555-0199','2125550199')])
 def test_phones_are_normalized_without_country_or_subscriber_guess(value,normalized):
     result=resolve_seed(value)
-    assert result['kind']=='phone'
+    assert result['kind']==normalized and False or result['kind']=='phone'
     assert result['normalized']==normalized
     assert result['domain'] is None
-    assert result['requires_resolution'] is True
+    assert result['requires_resolution'] is False
 
 
 @pytest.mark.parametrize('value,kind',[

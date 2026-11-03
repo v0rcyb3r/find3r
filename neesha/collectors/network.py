@@ -93,12 +93,15 @@ def fetch_http(url: str, timeout: int = 8) -> dict[str, Any]:
         }
 
 
+_MAX_HTTP_BYTES = 4 * 1024 * 1024
+
+
 def http_get(url: str, headers: Optional[dict[str, str]] = None, timeout: int = 20) -> str:
     """GET a URL and return the decoded body text."""
     merged = {"User-Agent": _UA, **(headers or {})}
     req = urllib.request.Request(url, method="GET", headers=merged)
     with urllib.request.urlopen(req, timeout=timeout, context=_default_context()) as resp:
-        return resp.read().decode("utf-8", errors="replace")
+        return resp.read(_MAX_HTTP_BYTES).decode("utf-8", errors="replace")
 
 
 def http_get_json(url: str, headers: Optional[dict[str, str]] = None, timeout: int = 20) -> Any:
@@ -116,4 +119,4 @@ def http_post_json(
     merged = {"User-Agent": _UA, "Content-Type": "application/json", **(headers or {})}
     req = urllib.request.Request(url, data=json.dumps(payload).encode(), method="POST", headers=merged)
     with urllib.request.urlopen(req, timeout=timeout, context=_default_context()) as resp:
-        return json.loads(resp.read().decode("utf-8", errors="replace"))
+        return json.loads(resp.read(_MAX_HTTP_BYTES).decode("utf-8", errors="replace"))

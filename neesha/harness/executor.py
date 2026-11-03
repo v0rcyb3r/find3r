@@ -24,6 +24,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
+import threading
 from typing import Any, Optional
 
 from neesha.adapters.base import AdapterError, RawResult, Request
@@ -83,6 +84,7 @@ class Executor:
         self.engagement = engagement
         self.analyst = analyst
         self.caps = caps
+        self._lock = threading.RLock()
 
     def execute(
         self,
@@ -93,33 +95,34 @@ class Executor:
     ) -> StepResult:
         spec = spec_of(adapter)
 
-        # 1. Cache before cost: a hit is free, so it must not be estimated
-        #    as though it were a call.
-        cache_key = adapter.cache_key(request)
-        cached_blob = self.repo.cache_get(cache_key)
-        estimate = (
-            Decimal("0")
-            if cached_blob
-            else Decimal(str(adapter.estimate_cost(request).usd))
-        )
+        with self._lock:
+            # 1. Cache before cost: a hit is free, so it must not be estimated
+            #    as though it were a call.
+            cache_key = adapter.cache_key(request)
+            cached_blob = self.repo.cache_get(cache_key)
+            estimate = (
+                Decimal("0")
+                if cached_blob
+                else Decimal(str(adapter.estimate_cost(request).usd))
+            )
 
-        # 2. Gate regardless. Holding a copy does not confer authority.
-        decision = self.gate.authorize(
-            adapter=spec,
-            target=request.value,
-            engagement=self.engagement,
-            analyst=self.analyst,
-            caps=self.caps,
-            state=state,
-            estimated_usd=estimate,
-            run_id=self.repo.run_id,
-            approved=approved,
-            subject_kind=request.entity_kind,
-        )
-        if decision.outcome == DENIED:
-            return StepResult(spec.name, DENIED, decision.reason)
-        if decision.outcome == PAUSED:
-            return StepResult(spec.name, PAUSED, decision.reason)
+            # 2. Gate regardless. Holding a copy does not confer authority.
+            decision = self.gate.authorize(
+                adapter=spec,
+                target=request.value,
+                engagement=self.engagement,
+                analyst=self.analyst,
+                caps=self.caps,
+                state=state,
+                estimated_usd=estimate,
+                run_id=self.repo.run_id,
+                approved=approved,
+                subject_kind=request.entity_kind,
+            )
+            if decision.outcome == DENIED:
+                return StepResult(spec.name, DENIED, decision.reason)
+            if decision.outcome == PAUSED:
+                return StepResult(spec.name, PAUSED, decision.reason)
 
         if cached_blob:
             raw = RawResult.from_envelope(cached_blob)
@@ -127,51 +130,53 @@ class Executor:
             cost = Decimal("0")
         else:
             raw, failure = self._collect(adapter, request)
-            if failure is not None:
-                self._release(decision)
-                return StepResult(spec.name, FAILED, failure)
-            self.repo.cache_put(
-                cache_key, spec.name, raw.to_envelope(), adapter.retention_policy()
+            with self._lock:
+                if failure is not None:
+                    self._release(decision)
+                    return StepResult(spec.name, FAILED, failure)
+                self.repo.cache_put(
+                    cache_key, spec.name, raw.to_envelope(), adapter.retention_policy()
+                )
+                outcome = COLLECTED
+                cost = self._settle(decision, estimate)
+
+        with self._lock:
+            # 4. Provenance first, then the facts that depend on it.
+            source_record_id = self.repo.write_source_record(
+                adapter=spec.name,
+                tier=spec.tier,
+                collection_mode=spec.collection_mode,
+                raw=raw,
+                retention=adapter.retention_policy(),
             )
-            outcome = COLLECTED
-            cost = self._settle(decision, estimate)
 
-        # 4. Provenance first, then the facts that depend on it.
-        source_record_id = self.repo.write_source_record(
-            adapter=spec.name,
-            tier=spec.tier,
-            collection_mode=spec.collection_mode,
-            raw=raw,
-            retention=adapter.retention_policy(),
-        )
+            try:
+                drafts = adapter.parse(raw, request)
+            except AdapterError as exc:
+                # The call succeeded and was paid for; only parsing failed. The
+                # source record stays, so the raw payload is available to
+                # re-parse once the parser is fixed.
+                return StepResult(
+                    spec.name,
+                    FAILED,
+                    f"parse failed: {exc}",
+                    cost_usd=cost,
+                    source_record_id=source_record_id,
+                )
 
-        try:
-            drafts = adapter.parse(raw, request)
-        except AdapterError as exc:
-            # The call succeeded and was paid for; only parsing failed. The
-            # source record stays, so the raw payload is available to
-            # re-parse once the parser is fixed.
-            return StepResult(
-                spec.name,
-                FAILED,
-                f"parse failed: {exc}",
-                cost_usd=cost,
+            except ValueError:
+                return StepResult(
+                    spec.name, FAILED, "parse failed: invalid or sensitive provider records",
+                    cost_usd=cost, source_record_id=source_record_id,
+                )
+
+            written = self.repo.write_facts(
+                drafts,
                 source_record_id=source_record_id,
+                source_type=getattr(adapter, "source_type", "osint"),
+                subject_name=request.value,
+                retention=adapter.retention_policy(),
             )
-
-        except ValueError:
-            return StepResult(
-                spec.name, FAILED, "parse failed: invalid or sensitive provider records",
-                cost_usd=cost, source_record_id=source_record_id,
-            )
-
-        written = self.repo.write_facts(
-            drafts,
-            source_record_id=source_record_id,
-            source_type=getattr(adapter, "source_type", "osint"),
-            subject_name=request.value,
-            retention=adapter.retention_policy(),
-        )
         return StepResult(
             adapter=spec.name,
             outcome=outcome,

@@ -210,3 +210,517 @@ def score_brief(facts: list[dict], profile=None) -> dict:
     """
     rows = _observations(facts)
     return {'commercial_fit': _commercial(rows, profile), 'security_needs': _security(rows)}
+
+
+def _unique(items) -> list[str]:
+    return sorted({x for x in items if isinstance(x, str) and x})
+
+
+HEADER_CRITERIA = tuple(
+    (h.replace('-', '_'), h.title(), 'http.security_header.' + h, 1.0)
+    for h in _HEADERS
+)
+
+
+def _letter_from_score(score: float | int | None) -> str:
+    if score is None:
+        return 'N/A'
+    if score >= 90:
+        return 'A'
+    if score >= 80:
+        return 'B'
+    if score >= 70:
+        return 'C'
+    if score >= 60:
+        return 'D'
+    return 'F'
+
+
+def _exposure(exp_id: str, severity: str, category: str, title: str, observed: str,
+              consequence: str, remediation: str, stakeholder: str, matching: list[dict]) -> dict:
+    return {
+        'id': exp_id,
+        'severity': severity,
+        'category': category,
+        'title': title,
+        'observed': observed,
+        'consequence': consequence,
+        'remediation': remediation,
+        'stakeholder_function': stakeholder,
+        'evidence_ids': _unique(r['fact_id'] for r in matching),
+        'source_record_ids': _unique(r['source_record_id'] for r in matching),
+    }
+
+
+RISKY_PORTS = {
+    '21': ('FTP (21/tcp)', 'medium', 'Cleartext file transfer service exposed to the internet.'),
+    '22': ('SSH (22/tcp)', 'low', 'Remote administration service exposed publicly; target for brute-force or key stuffing.'),
+    '23': ('Telnet (23/tcp)', 'critical', 'Unencrypted legacy remote shell exposed to the internet.'),
+    '25': ('SMTP (25/tcp)', 'low', 'Mail transfer agent exposed; verify relay restrictions and STARTTLS enforcement.'),
+    '445': ('SMB (445/tcp)', 'critical', 'Windows SMB file sharing exposed to the internet; high ransomware and lateral movement risk.'),
+    '1433': ('MS-SQL (1433/tcp)', 'high', 'Microsoft SQL Server port directly reachable from the internet.'),
+    '3306': ('MySQL (3306/tcp)', 'high', 'MySQL database port directly reachable from the internet.'),
+    '3389': ('RDP (3389/tcp)', 'high', 'Remote Desktop Protocol exposed to the internet; frequent initial access vector.'),
+    '5432': ('PostgreSQL (5432/tcp)', 'high', 'PostgreSQL database port directly reachable from the internet.'),
+    '6379': ('Redis (6379/tcp)', 'critical', 'Redis datastore port exposed to the internet.'),
+    '9200': ('Elasticsearch (9200/tcp)', 'high', 'Elasticsearch HTTP API exposed to the internet.'),
+    '27017': ('MongoDB (27017/tcp)', 'critical', 'MongoDB database port exposed to the internet.'),
+}
+
+SEVERITY_RANK = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}
+
+
+def grade_brief_posture(facts: list[dict]) -> dict:
+    """Compute A-F security posture grades across 5 domains and generate prioritized exposures."""
+    rows = _observations(facts)
+    by_attr: dict[str, list[dict]] = {}
+    for row in rows:
+        by_attr.setdefault(row['attribute'], []).append(row)
+
+    exposures: list[dict] = []
+    categories: dict[str, dict] = {}
+
+    # 1. Email Authentication & Spoofing Defense
+    dmarc_rows = by_attr.get('email.dmarc.policy', [])
+    spf_rows = by_attr.get('email.spf.qualifier', [])
+    dkim_rows = by_attr.get('email.dkim.selector', [])
+    mtasts_rows = by_attr.get('email.mtasts.present', [])
+    tlsrpt_rows = by_attr.get('email.tlsrpt.present', [])
+    rua_rows = by_attr.get('email.dmarc.rua', [])
+
+    if dmarc_rows or spf_rows or dkim_rows or mtasts_rows:
+        email_score = 100
+        email_reasons = []
+        email_evidence = dmarc_rows + spf_rows + dkim_rows + mtasts_rows + tlsrpt_rows + rua_rows
+
+        if dmarc_rows:
+            dmarc_val = dmarc_rows[0]['value'].strip().casefold()
+            if dmarc_val == 'absent':
+                email_score -= 45
+                email_reasons.append('No DMARC policy published')
+                exposures.append(_exposure(
+                    'exp-dmarc-absent', 'high', 'Email Security',
+                    'Missing DMARC Policy (_dmarc TXT)',
+                    'No _dmarc TXT record published',
+                    'Attackers can spoof the primary domain in phishing and business email compromise (BEC) campaigns without receiving servers rejecting or quarantining unauthenticated messages.',
+                    'Publish a `_dmarc` TXT record starting with `v=DMARC1; p=quarantine; rua=mailto:dmarc@<domain>;` and advance to `p=reject` after verifying legitimate senders.',
+                    'IT / Messaging Operations',
+                    dmarc_rows,
+                ))
+            elif dmarc_val == 'none':
+                email_score -= 30
+                email_reasons.append('DMARC p=none (monitoring only)')
+                exposures.append(_exposure(
+                    'exp-dmarc-none', 'medium', 'Email Security',
+                    'Non-Enforcing DMARC Policy (p=none)',
+                    'DMARC policy is p=none',
+                    'Spoofed messages failing SPF and DKIM alignment are still delivered to recipient inboxes because DMARC is in monitoring-only mode.',
+                    'Review aggregate DMARC reports (rua) and upgrade `_dmarc` policy from `p=none` to `p=quarantine` or `p=reject`.',
+                    'IT / Messaging Operations',
+                    dmarc_rows,
+                ))
+            elif dmarc_val == 'quarantine':
+                email_score -= 10
+                email_reasons.append('DMARC p=quarantine')
+            elif dmarc_val == 'reject':
+                email_reasons.append('DMARC p=reject enforced')
+            if dmarc_val in ('none', 'quarantine', 'reject') and not rua_rows:
+                email_score -= 5
+                email_reasons.append('No DMARC rua reporting URI')
+
+        if spf_rows:
+            spf_val = spf_rows[0]['value'].strip().casefold()
+            if spf_val == 'absent':
+                email_score -= 30
+                email_reasons.append('No SPF record published')
+                exposures.append(_exposure(
+                    'exp-spf-absent', 'high', 'Email Security',
+                    'Missing SPF Policy',
+                    'No v=spf1 TXT record published',
+                    'Receiving mail servers cannot verify authorized outbound mail servers for the domain, increasing spoofing risk.',
+                    'Publish a `v=spf1` TXT record listing authorized sending hosts/includes and terminating with `-all`.',
+                    'IT / Messaging Operations',
+                    spf_rows,
+                ))
+            elif spf_val == '+all':
+                email_score -= 40
+                email_reasons.append('SPF +all permits any sender')
+                exposures.append(_exposure(
+                    'exp-spf-pass-all', 'critical', 'Email Security',
+                    'Permissive SPF Policy (+all)',
+                    'SPF qualifier is +all',
+                    'The domain explicitly authorizes every IP address on the internet to send authenticated email on its behalf.',
+                    'Immediately replace `+all` with `~all` or `-all` in the root SPF TXT record.',
+                    'IT / Messaging Operations',
+                    spf_rows,
+                ))
+            elif spf_val == '~all':
+                email_score -= 10
+                email_reasons.append('SPF ~all (softfail)')
+                exposures.append(_exposure(
+                    'exp-spf-softfail', 'low', 'Email Security',
+                    'SPF Softfail (~all) Instead of Hardfail (-all)',
+                    'SPF qualifier is ~all',
+                    'Unauthorized senders receive a softfail marker rather than a strict SPF fail directive.',
+                    'Transition the SPF record terminator from `~all` to `-all` once all legitimate sending services are accounted for.',
+                    'IT / Messaging Operations',
+                    spf_rows,
+                ))
+            elif spf_val == '-all':
+                email_reasons.append('SPF -all enforced')
+
+        if dkim_rows:
+            selectors = sorted({r['value'] for r in dkim_rows})
+            email_reasons.append(f"DKIM active ({', '.join(selectors[:3])})")
+        elif dmarc_rows or spf_rows:
+            email_score -= 10
+            email_reasons.append('No common DKIM selector detected')
+
+        if mtasts_rows:
+            mtasts_val = mtasts_rows[0]['value'].strip().casefold()
+            if mtasts_val == 'absent':
+                email_score -= 10
+                email_reasons.append('MTA-STS absent')
+                exposures.append(_exposure(
+                    'exp-mtasts-absent', 'low', 'Email Security',
+                    'Missing Inbound Mail TLS Enforcement (MTA-STS)',
+                    '_mta-sts TXT record is absent',
+                    'Inbound SMTP connections are susceptible to STARTTLS downgrade or man-in-the-middle interception.',
+                    'Publish an `_mta-sts.<domain>` TXT record and host a valid policy at `https://mta-sts.<domain>/.well-known/mta-sts.txt`.',
+                    'IT / Messaging Operations',
+                    mtasts_rows,
+                ))
+            else:
+                email_reasons.append('MTA-STS enabled')
+
+        email_score = max(0, min(100, email_score))
+        categories['email_auth'] = {
+            'label': 'Email Authentication',
+            'letter': _letter_from_score(email_score),
+            'score': email_score,
+            'rationale': '; '.join(email_reasons) or 'Assessed from DNS records.',
+            'evidence_ids': _unique(r['fact_id'] for r in email_evidence),
+        }
+    else:
+        categories['email_auth'] = {
+            'label': 'Email Authentication',
+            'letter': 'N/A',
+            'score': None,
+            'rationale': 'No DNS email authentication records collected in this run.',
+            'evidence_ids': [],
+        }
+
+    # 2. TLS & Certificate Posture
+    tls_days_rows = by_attr.get('tls.days_remaining', [])
+    tls_issuer_rows = by_attr.get('tls.issuer', [])
+    hsts_rows = by_attr.get('http.security_header.strict-transport-security', [])
+    assessed_rows = by_attr.get('http.security_assessed', [])
+
+    if tls_days_rows or tls_issuer_rows or hsts_rows or assessed_rows:
+        tls_score = 100
+        tls_reasons = []
+        tls_evidence = tls_days_rows + tls_issuer_rows + hsts_rows + assessed_rows
+        if tls_days_rows:
+            try:
+                days = int(tls_days_rows[0]['value'])
+                if days < 0:
+                    tls_score -= 60
+                    tls_reasons.append(f'TLS certificate expired ({days} days)')
+                    exposures.append(_exposure(
+                        'exp-tls-expired', 'critical', 'TLS & Cryptography',
+                        'Expired TLS Certificate',
+                        f'Certificate expired ({days} days remaining)',
+                        'Browsers and API clients will distrust HTTPS connections, causing outages and conditioning users to bypass security warnings.',
+                        'Renew and deploy a valid TLS certificate immediately and configure automated ACME renewal.',
+                        'Web / Platform Engineering',
+                        tls_days_rows,
+                    ))
+                elif days <= 14:
+                    tls_score -= 30
+                    tls_reasons.append(f'TLS certificate expires in {days} days')
+                    exposures.append(_exposure(
+                        'exp-tls-expiring', 'high', 'TLS & Cryptography',
+                        'Imminent TLS Certificate Expiration',
+                        f'{days} days remaining until TLS certificate expiry',
+                        'Certificate expiration within 14 days risks service disruption if automated renewal fails.',
+                        'Verify automated certificate renewal pipeline and renew the certificate ahead of expiry.',
+                        'Web / Platform Engineering',
+                        tls_days_rows,
+                    ))
+                else:
+                    tls_reasons.append(f'Valid TLS certificate ({days}d remaining)')
+            except ValueError:
+                pass
+        if tls_issuer_rows:
+            tls_reasons.append(f"Issuer: {tls_issuer_rows[0]['value']}")
+        if hsts_rows:
+            tls_reasons.append('HSTS enforced')
+        elif assessed_rows:
+            tls_score -= 20
+            tls_reasons.append('HSTS header missing')
+        tls_score = max(0, min(100, tls_score))
+        categories['tls_transport'] = {
+            'label': 'TLS & Transport Security',
+            'letter': _letter_from_score(tls_score),
+            'score': tls_score,
+            'rationale': '; '.join(tls_reasons) or 'Assessed from TLS/HTTPS inspection.',
+            'evidence_ids': _unique(r['fact_id'] for r in tls_evidence),
+        }
+    else:
+        categories['tls_transport'] = {
+            'label': 'TLS & Transport Security',
+            'letter': 'N/A',
+            'score': None,
+            'rationale': 'No TLS certificate or HTTPS transport observations collected.',
+            'evidence_ids': [],
+        }
+
+    # 3. HTTP Security Headers
+    header_rows = [r for k, v in by_attr.items() if k.startswith('http.security_header.') for r in v]
+    if assessed_rows or header_rows:
+        present_count = 0
+        missing_labels = []
+        for cid, label, attr, _ in HEADER_CRITERIA:
+            if by_attr.get(attr):
+                present_count += 1
+            elif assessed_rows:
+                missing_labels.append((cid, label, attr))
+        total_headers = len(HEADER_CRITERIA)
+        if assessed_rows:
+            hdr_score = round((present_count / total_headers) * 100)
+        else:
+            hdr_score = min(100, 60 + present_count * 10)
+        if missing_labels:
+            # Create consolidated or high-impact exposures for missing HSTS / CSP / XFO
+            for cid, label, attr in missing_labels:
+                if attr == 'http.security_header.strict-transport-security':
+                    exposures.append(_exposure(
+                        'exp-header-hsts', 'medium', 'Web Application Security',
+                        'Missing HTTP Strict-Transport-Security (HSTS) Header',
+                        'Strict-Transport-Security header not present on HTTPS response',
+                        'Browsers may permit initial cleartext HTTP connections before redirecting, enabling SSL-stripping attacks.',
+                        'Add `Strict-Transport-Security: max-age=31536000; includeSubDomains` to all HTTPS responses.',
+                        'Web / Platform Engineering',
+                        assessed_rows,
+                    ))
+                elif attr == 'http.security_header.content-security-policy':
+                    exposures.append(_exposure(
+                        'exp-header-csp', 'medium', 'Web Application Security',
+                        'Missing Content-Security-Policy (CSP) Header',
+                        'Content-Security-Policy header not present on HTTPS response',
+                        'Lack of a Content Security Policy increases impact of Cross-Site Scripting (XSS) and unauthorized third-party script injection.',
+                        'Deploy a restrictive `Content-Security-Policy` header defining trusted script, frame, and connect origins.',
+                        'Web / Platform Engineering',
+                        assessed_rows,
+                    ))
+            other_missing = [lbl for _, lbl, attr in missing_labels
+                             if attr not in ('http.security_header.strict-transport-security',
+                                             'http.security_header.content-security-policy')]
+            if other_missing:
+                exposures.append(_exposure(
+                    'exp-headers-hardening', 'low', 'Web Application Security',
+                    f"Missing Defensive HTTP Headers ({', '.join(other_missing)})",
+                    f"Absent headers: {', '.join(other_missing)}",
+                    'Missing browser hardening headers increase exposure to clickjacking, MIME-sniffing, and cross-origin referrer leakage.',
+                    'Configure `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`, and `Permissions-Policy` at the CDN or reverse proxy.',
+                    'Web / Platform Engineering',
+                    assessed_rows,
+                ))
+        categories['web_headers'] = {
+            'label': 'Web Application Headers',
+            'letter': _letter_from_score(hdr_score),
+            'score': hdr_score,
+            'rationale': f'{present_count}/{total_headers} defensive HTTP security headers observed.',
+            'evidence_ids': _unique(r['fact_id'] for r in (assessed_rows + header_rows)),
+        }
+    else:
+        categories['web_headers'] = {
+            'label': 'Web Application Headers',
+            'letter': 'N/A',
+            'score': None,
+            'rationale': 'Web response headers were not inspected in this run.',
+            'evidence_ids': [],
+        }
+
+    # 4. DNSSEC & Domain Integrity
+    dnssec_rows = by_attr.get('dnssec.status', [])
+    whois_status_rows = by_attr.get('whois.status', [])
+    if dnssec_rows or whois_status_rows:
+        dns_score = 100
+        dns_reasons = []
+        if dnssec_rows:
+            val = dnssec_rows[0]['value'].strip().casefold()
+            if val == 'present':
+                dns_reasons.append('DNSSEC signed (DNSKEY present)')
+            else:
+                dns_score -= 30
+                dns_reasons.append('DNSSEC unsigned')
+                exposures.append(_exposure(
+                    'exp-dnssec-absent', 'low', 'DNS & Domain Hygiene',
+                    'Domain Not Signed with DNSSEC',
+                    'No DNSKEY records published for zone',
+                    'Unsigned DNS zones lack cryptographic origin authentication and can be targeted by DNS cache poisoning or BGP/registrar hijacking.',
+                    'Enable DNSSEC signing at the authoritative DNS provider and publish DS records at the domain registrar.',
+                    'Network / Infrastructure Security',
+                    dnssec_rows,
+                ))
+        if whois_status_rows:
+            statuses = [r['value'] for r in whois_status_rows]
+            if any('transferprohibited' in s.lower() for s in statuses):
+                dns_reasons.append('Registrar transfer lock active')
+            else:
+                dns_score -= 15
+                dns_reasons.append('No transfer lock status observed in RDAP')
+        dns_score = max(0, min(100, dns_score))
+        categories['dnssec'] = {
+            'label': 'DNS & Domain Hygiene',
+            'letter': _letter_from_score(dns_score),
+            'score': dns_score,
+            'rationale': '; '.join(dns_reasons) or 'Assessed from DNS/RDAP records.',
+            'evidence_ids': _unique(r['fact_id'] for r in (dnssec_rows + whois_status_rows)),
+        }
+    else:
+        categories['dnssec'] = {
+            'label': 'DNS & Domain Hygiene',
+            'letter': 'N/A',
+            'score': None,
+            'rationale': 'No DNSSEC or RDAP domain status observations collected.',
+            'evidence_ids': [],
+        }
+
+    # 5. Network, Vulnerability & Identity Exposure
+    vuln_rows = by_attr.get('host.vuln', [])
+    port_rows = by_attr.get('host.port', [])
+    leak_rows = by_attr.get('public.email.emailrep.credentials_leaked', [])
+    breach_rows = by_attr.get('public.email.emailrep.data_breach', [])
+    intelx_rows = by_attr.get('intelx.record.bucket', []) + [
+        r for r in by_attr.get('intelx.search.sample_count', [])
+        if r['value'].isdigit() and int(r['value']) > 0
+    ]
+    ip_rows = by_attr.get('dns.a', [])
+
+    if vuln_rows or port_rows or leak_rows or breach_rows or intelx_rows or ip_rows:
+        net_score = 100
+        net_reasons = []
+        net_evidence = vuln_rows + port_rows + leak_rows + breach_rows + intelx_rows + ip_rows
+
+        if vuln_rows:
+            cves = sorted({r['value'] for r in vuln_rows})
+            net_score -= min(60, len(cves) * 20)
+            net_reasons.append(f"{len(cves)} CVE(s) associated with exposed host services ({', '.join(cves[:4])})")
+            exposures.append(_exposure(
+                'exp-host-vulns', 'critical', 'Network & Vulnerability Exposure',
+                f"Known CVEs Associated with Exposed Host Services ({len(cves)} found)",
+                ', '.join(cves[:8]),
+                'Publicly reachable host fingerprints match known Common Vulnerabilities and Exposures (CVEs) indexed by Shodan InternetDB.',
+                'Patch affected externally facing services immediately, restrict access via firewall/VPN, and verify version banners.',
+                'Network / Infrastructure Security',
+                vuln_rows,
+            ))
+
+        if port_rows:
+            ports = sorted({r['value'] for r in port_rows}, key=lambda x: int(x) if x.isdigit() else 99999)
+            net_reasons.append(f"Open ports observed: {', '.join(ports[:8])}")
+            for p_str in ports:
+                if p_str in RISKY_PORTS:
+                    p_label, p_sev, p_desc = RISKY_PORTS[p_str]
+                    deduction = 25 if p_sev == 'critical' else 15 if p_sev == 'high' else 5
+                    net_score -= deduction
+                    matching_p = [r for r in port_rows if r['value'] == p_str]
+                    exposures.append(_exposure(
+                        f'exp-port-{p_str}', p_sev, 'Network & Vulnerability Exposure',
+                        f'Exposed Network Service: {p_label}',
+                        f'Port {p_str}/tcp open on target infrastructure',
+                        p_desc,
+                        f'Restrict port {p_str}/tcp behind a zero-trust access proxy, VPN, or IP allowlist if public access is not required.',
+                        'Network / Infrastructure Security',
+                        matching_p,
+                    ))
+
+        if any(r['value'].strip().casefold() == 'true' for r in leak_rows):
+            net_score -= 35
+            net_reasons.append('Leaked credentials reported')
+            exposures.append(_exposure(
+                'exp-credentials-leaked', 'critical', 'Identity & Credential Exposure',
+                'Leaked Credentials Indexed in Public/Breach Sources',
+                'emailrep credentials_leaked=true',
+                'Credential pairs associated with the subject have been observed in breach corpuses, enabling credential stuffing or account takeover.',
+                'Force password rotation, revoke active sessions/tokens, and enforce phishing-resistant MFA.',
+                'Identity / SecOps',
+                leak_rows,
+            ))
+
+        if any(r['value'].strip().casefold() == 'true' for r in breach_rows):
+            net_score -= 20
+            net_reasons.append('Known data breach exposure')
+            exposures.append(_exposure(
+                'exp-data-breach', 'high', 'Identity & Credential Exposure',
+                'Identity Observed in Known Data Breach Corpus',
+                'emailrep data_breach=true',
+                'Target identity metadata appears in historical third-party breach disclosures.',
+                'Audit account recovery workflows, rotate credentials, and monitor for targeted spear-phishing.',
+                'Identity / SecOps',
+                breach_rows,
+            ))
+
+        if intelx_rows:
+            buckets = sorted({r['value'] for r in intelx_rows})
+            net_score -= 20
+            net_reasons.append(f"Intelligence X buckets: {', '.join(buckets[:4])}")
+            exposures.append(_exposure(
+                'exp-intelx-hits', 'high', 'Identity & Credential Exposure',
+                f"External Intelligence Records Indexed ({', '.join(buckets[:3])})",
+                f"Observed in buckets: {', '.join(buckets)}",
+                'Domain or identity selectors appear in external leak/paste/archive collections.',
+                'Review matching Intelligence X record metadata and rotate any exposed secrets or session tokens.',
+                'Identity / SecOps',
+                intelx_rows,
+            ))
+
+        if not net_reasons and ip_rows:
+            net_reasons.append(f"{len({r['value'] for r in ip_rows})} resolved IPv4 host(s) with no flagged CVEs or risky ports")
+
+        net_score = max(0, min(100, net_score))
+        categories['network_exposure'] = {
+            'label': 'Network & Exposure Surface',
+            'letter': _letter_from_score(net_score),
+            'score': net_score,
+            'rationale': '; '.join(net_reasons) or 'Assessed from host and breach telemetry.',
+            'evidence_ids': _unique(r['fact_id'] for r in net_evidence),
+        }
+    else:
+        categories['network_exposure'] = {
+            'label': 'Network & Exposure Surface',
+            'letter': 'N/A',
+            'score': None,
+            'rationale': 'No host port, CVE, or breach telemetry collected in this run.',
+            'evidence_ids': [],
+        }
+
+    # Overall posture grade
+    assessed_cats = [c for c in categories.values() if c['score'] is not None]
+    if assessed_cats:
+        overall_score = round(sum(c['score'] for c in assessed_cats) / len(assessed_cats))
+        overall_letter = _letter_from_score(overall_score)
+        overall_rationale = (
+            f"Aggregated across {len(assessed_cats)}/5 assessed security domains "
+            f"({', '.join(c['label'] + ': ' + c['letter'] for c in assessed_cats)})."
+        )
+    else:
+        overall_score = None
+        overall_letter = 'N/A'
+        overall_rationale = 'No posture-bearing telemetry collected in this run.'
+
+    exposures.sort(key=lambda e: (SEVERITY_RANK.get(e['severity'], 99), e['title']))
+
+    return {
+        'overall': {
+            'letter': overall_letter,
+            'score': overall_score,
+            'rationale': overall_rationale,
+            'assessed_domains': len(assessed_cats),
+            'total_domains': len(categories),
+        },
+        'categories': categories,
+        'exposures': exposures,
+    }

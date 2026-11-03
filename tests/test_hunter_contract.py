@@ -66,14 +66,15 @@ def test_hunter_small_request_and_explicit_larger_application_cap(configured, mo
         HunterAdapter(max_people=1000)
 
 
-def test_hunter_availability_requires_both_key_and_cost(monkeypatch):
+def test_hunter_availability_requires_key_and_uses_default_cost(monkeypatch):
     monkeypatch.delenv('HUNTER_API_KEY', raising=False)
     monkeypatch.delenv('HUNTER_ESTIMATED_USD_PER_SEARCH', raising=False)
     assert not HunterAdapter().availability()['available']
     monkeypatch.setenv('HUNTER_API_KEY', 'key')
-    assert not HunterAdapter().availability()['available']
-    monkeypatch.setenv('HUNTER_ESTIMATED_USD_PER_SEARCH', '0.01')
     assert HunterAdapter().availability()['available']
+    assert HunterAdapter().estimate_cost(SEED).usd == 0.05
+    monkeypatch.setenv('HUNTER_ESTIMATED_USD_PER_SEARCH', '0.01')
+    assert HunterAdapter().estimate_cost(SEED).usd == 0.01
 
 
 def test_hunter_only_emits_company_emails_and_keeps_stable_identity(configured):

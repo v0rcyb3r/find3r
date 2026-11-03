@@ -75,7 +75,16 @@ class HunterAdapter(BaseAdapter):
     description: ClassVar[str] = "Hunter.io business email discovery (metered)"
     source_type: ClassVar[str] = "commercial_api"
     produces: ClassVar[frozenset[str]] = frozenset(
-        {"person.business_email", "person.role", "person.seniority", "email.pattern"}
+        {
+            "person.business_email",
+            "person.role",
+            "person.seniority",
+            "person.department",
+            "person.linkedin_url",
+            "person.twitter_handle",
+            "person.business_phone",
+            "email.pattern",
+        }
     )
     accepts: ClassVar[frozenset[str]] = frozenset({"company", "domain"})
     retention_days: ClassVar[int] = RETENTION_DAYS
@@ -92,8 +101,9 @@ class HunterAdapter(BaseAdapter):
 
     def estimate_cost(self, request: Request) -> Cost:
         self._limit(request)
+        raw_price = os.environ.get(PRICE_ENV, '0.05')
         try:
-            amount = Decimal(os.environ.get(PRICE_ENV, ''))
+            amount = Decimal(raw_price)
         except InvalidOperation:
             amount = Decimal('NaN')
         if not amount.is_finite() or not Decimal('0.0001') <= amount <= Decimal('1000000'):
@@ -173,7 +183,8 @@ class HunterAdapter(BaseAdapter):
                 raise ValueError()
             clean['emails'] = [
                 {field: record[field] for field in (
-                    'value', 'first_name', 'last_name', 'position', 'seniority'
+                    'value', 'first_name', 'last_name', 'position', 'seniority',
+                    'department', 'linkedin', 'twitter', 'phone_number',
                 ) if isinstance(record.get(field), str)}
                 for record in records[:self._limit(request)]
                 if isinstance(record, dict)
@@ -272,5 +283,22 @@ class HunterAdapter(BaseAdapter):
                         identity_key="email:" + address,
                     )
                 )
+            for field, attr in (
+                ("department", "person.department"),
+                ("linkedin", "person.linkedin_url"),
+                ("twitter", "person.twitter_handle"),
+                ("phone_number", "person.business_phone"),
+            ):
+                val = record.get(field)
+                if isinstance(val, str) and val.strip():
+                    drafts.append(
+                        FactDraft(
+                            attribute=attr,
+                            value=val.strip()[:300],
+                            entity_kind="person",
+                            entity_name=person,
+                            identity_key="email:" + address,
+                        )
+                    )
 
         return drafts

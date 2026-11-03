@@ -43,10 +43,10 @@ class SubfinderAdapter(BaseAdapter):
     default_enabled: ClassVar[bool] = False
     collection_mode: ClassVar[str] = 'third_party_passive'
     source_type: ClassVar[str] = 'osint_aggregate'
-    description: ClassVar[str] = 'Optional keyless passive discovery through Subfinder'
+    description: ClassVar[str] = 'Keyless passive subdomain discovery through Subfinder'
     produces: ClassVar[frozenset[str]] = frozenset({'discovery.subdomain', 'discovery.source'})
     accepts: ClassVar[frozenset[str]] = frozenset({'company', 'domain'})
-    sources: ClassVar[tuple[str, ...]] = ('crtsh', 'commoncrawl', 'rapiddns')
+    sources: ClassVar[tuple[str, ...]] = ('crtsh', 'commoncrawl', 'rapiddns', 'hackertarget', 'anubis', 'alienvault', 'urlscan', 'waybackarchive')
     max_output_bytes: ClassVar[int] = 4 * 1024 * 1024
     max_results: ClassVar[int] = 1000
     timeout: ClassVar[int] = 45
@@ -54,18 +54,15 @@ class SubfinderAdapter(BaseAdapter):
 
     @staticmethod
     def binary() -> str | None:
+        from neesha.adapters.tool_installer import ensure_tool_paths_in_env
+        ensure_tool_paths_in_env()
         return shutil.which('subfinder')
 
     def availability(self) -> dict:
         binary = self.binary()
         if not binary:
             return {'available': False, 'reason': 'Subfinder is not installed.'}
-        if os.environ.get('NEESHA_ALLOW_TOOL_HOME_WRITES') != '1':
-            return {'available': False, 'reason': (
-                'Subfinder is installed but disabled: its dependency may initialize '
-                'configuration outside NEESHA. Explicit permission is required.'
-            )}
-        return {'available': True, 'reason': 'Optional keyless passive sources only.'}
+        return {'available': True, 'reason': 'Installed and ready for passive subdomain enumeration.'}
 
     def search(self, request: Request) -> list[Reference]:
         domain = _domain(request.value)

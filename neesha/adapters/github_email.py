@@ -70,6 +70,12 @@ class GitHubEmailAdapter(BaseAdapter):
                     or parsed.query or parsed.fragment):
                 continue
             match = {'commit_url': url}
+            repo_name = repository.get('full_name')
+            if isinstance(repo_name, str) and re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo_name):
+                match['repo'] = repo_name[:200]
+            date = author.get('date')
+            if isinstance(date, str) and date.strip():
+                match['commit_date'] = date.strip()[:64]
             name = author.get('name')
             if isinstance(name, str) and name.strip():
                 match['author_name'] = name.strip()[:200]
@@ -92,7 +98,7 @@ class GitHubEmailAdapter(BaseAdapter):
         for match in data['matches'][:self.max_results]:
             if not isinstance(match, dict):
                 continue
-            for key in ('commit_url', 'author_name', 'linked_login'):
+            for key in ('commit_url', 'repo', 'commit_date', 'author_name', 'linked_login'):
                 value = match.get(key)
                 if not isinstance(value, str) or not value or (key, value) in seen:
                     continue

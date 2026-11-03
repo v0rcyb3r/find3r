@@ -6,6 +6,7 @@ addresses, standard ports, and a small number of linked company pages.
 """
 from __future__ import annotations
 
+import gzip
 import hashlib
 import http.client
 import ipaddress
@@ -14,6 +15,7 @@ import re
 import socket
 import ssl
 import time
+import zlib
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from typing import ClassVar
@@ -108,7 +110,7 @@ def safe_fetch(url: str, domain: str, *, deadline: float) -> tuple[str, str, dic
         try:
             connection.request('GET', path, headers={
                 'Host': host, 'User-Agent': 'NEESHA/0.1 (public business research)',
-                'Accept': 'text/html,application/xhtml+xml', 'Accept-Encoding': 'identity',
+                'Accept': 'text/html,application/xhtml+xml', 'Accept-Encoding': 'gzip, deflate, identity',
             })
             response = connection.getresponse()
             if response.status in (301, 302, 303, 307, 308):
@@ -119,7 +121,8 @@ def safe_fetch(url: str, domain: str, *, deadline: float) -> tuple[str, str, dic
                 continue
             if response.status != 200:
                 raise AdapterError(f'Company website returned HTTP {response.status}.')
-            if response.getheader('Content-Encoding', 'identity').lower() not in ('identity', ''):
+            encoding = response.getheader('Content-Encoding', 'identity').lower().strip()
+            if encoding not in ('identity', 'gzip', 'x-gzip', 'deflate', ''):
                 raise AdapterError('Unsupported company website content encoding.')
             mime = response.getheader('Content-Type', '').lower()
             if not any(t in mime for t in ('text/html', 'application/xhtml+xml')):
@@ -127,10 +130,29 @@ def safe_fetch(url: str, domain: str, *, deadline: float) -> tuple[str, str, dic
             body = response.read(MAX_BYTES + 1)
             if len(body) > MAX_BYTES:
                 raise AdapterError('Company website page exceeded the size limit.')
+            if encoding in ('gzip', 'x-gzip'):
+                try:
+                    body = gzip.decompress(body)
+                except Exception as exc:
+                    raise AdapterError('Company website gzip decompression failed.') from exc
+            elif encoding == 'deflate':
+                try:
+                    body = zlib.decompress(body)
+                except Exception:
+                    try:
+                        body = zlib.decompress(body, -zlib.MAX_WBITS)
+                    except Exception as exc:
+                        raise AdapterError('Company website deflate decompression failed.') from exc
             headers = {name: response.getheader(name) for name in SECURITY_HEADERS
                        if response.getheader(name) is not None}
+            tech_headers = {
+                name: response.getheader(name)
+                for name in ('server', 'x-powered-by', 'cf-ray', 'x-vercel-id', 'x-amz-cf-id', 'via', 'x-generator')
+                if response.getheader(name) is not None
+            }
             return url, body.decode('utf-8', errors='replace'), {
                 'status': response.status, 'security_headers': headers,
+                'tech_headers': tech_headers,
                 'tls_validated': scheme == 'https',
             }
         except AdapterError:
@@ -149,6 +171,10 @@ class _Page(HTMLParser):
         self.emails: set[str] = set()
         self.phones: set[str] = set()
         self.scripts: list[str] = []
+        self.script_srcs: list[str] = []
+        self.meta: dict[str, str] = {}
+        self.title_parts: list[str] = []
+        self._in_title = False
         self._json = False
         self._script = []
         self._hidden = 0
@@ -156,11 +182,22 @@ class _Page(HTMLParser):
 
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
+        if tag == 'title':
+            self._in_title = True
+        if tag == 'meta':
+            name = (attrs.get('name') or attrs.get('property') or '').lower().strip()
+            content = (attrs.get('content') or '').strip()
+            if name and content:
+                self.meta[name] = content[:400]
         if tag in ('script', 'style'):
             self._hidden += 1
-        if tag == 'script' and attrs.get('type', '').lower() == 'application/ld+json':
-            self._json = True
-            self._script = []
+        if tag == 'script':
+            src = attrs.get('src', '')
+            if src:
+                self.script_srcs.append(src)
+            if attrs.get('type', '').lower() == 'application/ld+json':
+                self._json = True
+                self._script = []
         if tag == 'a':
             href = attrs.get('href', '')
             if href.lower().startswith('mailto:'):
@@ -173,6 +210,8 @@ class _Page(HTMLParser):
                 self.links.append(href)
 
     def handle_endtag(self, tag):
+        if tag == 'title':
+            self._in_title = False
         if tag == 'script' and self._json:
             self.scripts.append(''.join(self._script))
             self._json = False
@@ -180,6 +219,8 @@ class _Page(HTMLParser):
             self._hidden = max(0, self._hidden - 1)
 
     def handle_data(self, data):
+        if self._in_title:
+            self.title_parts.append(data)
         if self._json:
             self._script.append(data)
         if not self._hidden:
@@ -212,9 +253,12 @@ class CompanyWebAdapter(BaseAdapter):
     description: ClassVar[str] = 'Published company emails, telephone links and structured professional roles'
     produces: ClassVar[frozenset[str]] = frozenset({
         'company.business_email', 'company.business_phone', 'company.contact_page',
+        'company.social_url',
         'person.business_email', 'person.business_phone', 'person.role', 'person.profile_url',
         'http.status', 'http.final_url', 'http.security_header', 'http.security_assessed',
         'tls.connection.validated',
+        'web.title', 'web.description',
+        'tech.server', 'tech.cdn', 'tech.framework', 'tech.cms', 'tech.analytics',
     })
     accepts: ClassVar[frozenset[str]] = frozenset({'company', 'domain'})
     retention_days: ClassVar[int] = 30
@@ -303,11 +347,63 @@ class CompanyWebAdapter(BaseAdapter):
                 # observed rather than merely uncollected.
                 if fetched:
                     add('http.security_assessed', 'true')
-        for page in bundle['pages'][:MAX_PAGES]:
+            tech_headers = homepage.get('tech_headers', {})
+            if isinstance(tech_headers, dict):
+                if isinstance(tech_headers.get('server'), str) and tech_headers['server'].strip():
+                    add('tech.server', tech_headers['server'].strip()[:120])
+                if isinstance(tech_headers.get('x-powered-by'), str) and tech_headers['x-powered-by'].strip():
+                    add('tech.framework', tech_headers['x-powered-by'].strip()[:120])
+                if tech_headers.get('cf-ray'):
+                    add('tech.cdn', 'Cloudflare')
+                if tech_headers.get('x-vercel-id'):
+                    add('tech.cdn', 'Vercel')
+                if tech_headers.get('x-amz-cf-id'):
+                    add('tech.cdn', 'AWS CloudFront')
+                if isinstance(tech_headers.get('x-generator'), str) and tech_headers['x-generator'].strip():
+                    add('tech.cms', tech_headers['x-generator'].strip()[:120])
+        for idx, page in enumerate(bundle['pages'][:MAX_PAGES]):
             if not isinstance(page, dict) or not isinstance(page.get('html'), str):
                 continue
+            html_text = page.get('html', '')
             parser = _Page()
-            parser.feed(page.get('html', ''))
+            parser.feed(html_text)
+            if idx == 0:
+                title = ' '.join(''.join(parser.title_parts).split())
+                if title:
+                    add('web.title', title[:250])
+                desc = parser.meta.get('description') or parser.meta.get('og:description')
+                if desc:
+                    add('web.description', desc[:350])
+                gen = parser.meta.get('generator')
+                if gen:
+                    add('tech.cms', gen[:120])
+                # Passive HTML/script technology fingerprinting
+                lower_html = html_text.lower()
+                for token, category, label in (
+                    ('/_next/static/', 'tech.framework', 'Next.js'),
+                    ('__nuxt', 'tech.framework', 'Nuxt.js'),
+                    ('/wp-content/', 'tech.cms', 'WordPress'),
+                    ('cdn.shopify.com', 'tech.cms', 'Shopify'),
+                    ('webflow.com', 'tech.cms', 'Webflow'),
+                    ('googletagmanager.com', 'tech.analytics', 'Google Tag Manager'),
+                    ('google-analytics.com', 'tech.analytics', 'Google Analytics'),
+                    ('js.hs-scripts.com', 'tech.analytics', 'HubSpot'),
+                    ('cdn.segment.com', 'tech.analytics', 'Segment'),
+                    ('widget.intercom.io', 'tech.analytics', 'Intercom'),
+                ):
+                    if token in lower_html:
+                        add(category, label)
+            # Extract official social profile links
+            for href in parser.links:
+                try:
+                    sp = urlsplit(href)
+                except ValueError:
+                    continue
+                if sp.scheme in ('http', 'https') and sp.hostname:
+                    shost = sp.hostname.lower().removeprefix('www.')
+                    if shost in ('linkedin.com', 'github.com', 'x.com', 'twitter.com', 'youtube.com') and len(sp.path.strip('/')) > 1:
+                        clean_social = urlunsplit((sp.scheme.lower(), sp.hostname.lower(), sp.path.rstrip('/'), '', ''))
+                        add('company.social_url', clean_social[:300])
             emails = parser.emails | set(EMAIL.findall(' '.join(parser.visible)))
             published = False
             for email in sorted(emails):

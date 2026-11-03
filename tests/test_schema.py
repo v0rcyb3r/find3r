@@ -126,14 +126,30 @@ def test_company_needs_no_parent(db):
     assert insert_company(db)
 
 
-def test_person_without_a_company_is_unrepresentable(db):
-    """The core of 'company-first': no free-standing individual subjects."""
-    with pytest.raises(sa.exc.IntegrityError):
+def test_child_entity_without_a_company_is_unrepresentable(db):
+    """Non-root child entities (host, service, vendor, account, url) must attach to a root entity."""
+    for kind in ("host", "service", "vendor", "account", "url"):
+        with pytest.raises(sa.exc.IntegrityError):
+            db.execute(
+                schema.entity.insert().values(
+                    id=_id(),
+                    kind=kind,
+                    canonical_name=f"x-{kind}",
+                    company_id=None,
+                    confidence="medium",
+                    first_seen_at=NOW,
+                    last_seen_at=NOW,
+                )
+            )
+
+
+def test_root_entities_need_no_parent(db):
+    for kind in ("company", "domain", "email", "username", "person", "ip", "phone"):
         db.execute(
             schema.entity.insert().values(
                 id=_id(),
-                kind="person",
-                canonical_name="A Person",
+                kind=kind,
+                canonical_name=f"root-{kind}",
                 company_id=None,
                 confidence="medium",
                 first_seen_at=NOW,

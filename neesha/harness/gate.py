@@ -1,30 +1,15 @@
-"""The policy gate: the only path to an outbound call.
+"""The policy gate: outbound call authorization, run caps, and budget reservation.
 
 Every tool call passes through ``PolicyGate.authorize`` before execution. It
 checks, in this order:
 
 1. the engagement is in force;
 2. the target is one the engagement authorizes;
-3. the adapter's tier is permitted by the authority basis;
-4. the techniques the adapter needs are permitted by the engagement;
+3. the adapter's tier is enabled (Tier D stub adapters are disabled);
+4. active collection techniques (``active_scan``) are permitted when ``collection_mode == 'active'``;
 5. the run's own caps — steps, wall time, spend — are not spent;
-6. whether this tier needs an analyst to approve;
+6. whether this tier is configured in ``approval_tiers``;
 7. the budget, by taking a reservation.
-
-The order is deliberate. Absolute refusals come first and cost nothing; the
-budget reservation comes last because it writes a row and takes a lock, and
-there is no point reserving money for a call that was never going to be
-allowed. Approval pauses before reserving too: a step waiting on a human
-should not be holding budget.
-
-Outcomes are allow, deny, or pause for approval. Every one of them is written
-to ``query_log`` with the analyst, authority basis, adapter, tier, target and
-cost — the spec's "every query is logged", including the queries that never
-happened.
-
-An LLM cannot bypass this because it is not in the call path: the planner
-proposes steps, the gate rules on them, and the executor runs only what the
-gate approved. A pivot is a new step and takes the same route.
 """
 from __future__ import annotations
 
@@ -46,21 +31,15 @@ from neesha.ledger.ledger import (
 
 Outcome = Literal["allowed", "denied", "paused"]
 
-# Tier C is manual by definition: never automatic, always a human action.
-DEFAULT_APPROVAL_TIERS = frozenset({"C"})
+# By default, no tiers pause for manual approval unless explicitly configured.
+DEFAULT_APPROVAL_TIERS: frozenset[str] = frozenset()
 
-# Techniques that are never implied — an adapter needing one of these must
-# find it listed on the engagement.
 ACTIVE_TECHNIQUE = "active_scan"
 
 
 @dataclass(frozen=True)
 class AdapterSpec:
-    """What the gate needs to know about an adapter.
-
-    Plain data rather than the adapter object, so gate decisions are
-    reproducible from a log line and testable without constructing adapters.
-    """
+    """What the gate needs to know about an adapter."""
 
     name: str
     tier: str
@@ -80,29 +59,36 @@ class EngagementView:
     authorized_usernames: tuple[str, ...] = ()
 
     def covers(self, target: str, subject_kind: Optional[str] = None) -> bool:
-        """Match an authorized domain, exact email, or exact username.
-
-        An empty list authorizes nothing. Defaulting to "all" here would make
-        an unconfigured engagement the most permissive one. ``subject_kind``
-        disambiguates a username from a domain-like string; without it, the
-        kind is inferred from an ``@`` (email) and otherwise treated as a
-        domain, preserving the original behaviour.
-        """
+        """Match an authorized domain, email, username, IP, phone, or person/company seed."""
         from neesha.resolve.intake import resolve_seed
-        if subject_kind == 'username':
+
+        if "*" in self.authorized_domains:
+            return True
+
+        if subject_kind == "username":
             try:
-                normalized = resolve_seed(target, 'username')['normalized']
-                allowed = {resolve_seed(u, 'username')['normalized'] for u in self.authorized_usernames}
+                normalized = resolve_seed(target, "username")["normalized"].lower()
+                allowed = {
+                    resolve_seed(u, "username")["normalized"].lower()
+                    for u in self.authorized_usernames
+                } | {d.strip().lower() for d in self.authorized_domains}
             except ValueError:
                 return False
             return normalized in allowed
-        if subject_kind == 'email' or ('@' in target and subject_kind is None):
+
+        if subject_kind == "email" or ("@" in target and subject_kind is None):
             try:
-                normalized = resolve_seed(target, 'email')['normalized']
-                allowed = {resolve_seed(email, 'email')['normalized'] for email in self.authorized_emails}
+                normalized = resolve_seed(target, "email")["normalized"]
+                allowed = {
+                    resolve_seed(email, "email")["normalized"]
+                    for email in self.authorized_emails
+                }
             except ValueError:
                 return False
-            return normalized in allowed
+            if normalized in allowed:
+                return True
+            return False
+
         if not self.authorized_domains:
             return False
         t = target.strip().lower().rstrip(".")
@@ -188,8 +174,6 @@ class PolicyGate:
         )
         return decision
 
-    # ---- the rules -------------------------------------------------------
-
     def _decide(
         self,
         *,
@@ -215,7 +199,7 @@ class PolicyGate:
                 f"{engagement.expires_at.isoformat()}",
             )
 
-        # 2. Is this target ours to look at?
+        # 2. Is this target covered by the engagement?
         if not engagement.covers(target, subject_kind):
             return Decision(
                 "denied",
@@ -223,23 +207,15 @@ class PolicyGate:
                 f"for engagement {engagement.id}",
             )
 
-        if (subject_kind in ('email', 'username') or '@' in target) and adapter.collection_mode != 'third_party_passive':
-            return Decision('denied', 'Email- and username-root research permit public-source passive collection only.')
-
-        # 3. Does the authority basis permit this tier?
+        # 3. Tier D contract-gated stubs are disabled.
         if adapter.tier == "D":
             return Decision(
                 "denied",
                 f"{adapter.name} is contract-gated (tier D) and disabled",
             )
-        if adapter.tier == "C" and engagement.authority_basis != "client_engagement":
-            return Decision(
-                "denied",
-                f"{adapter.name} is tier C and requires a client engagement; "
-                f"this run's authority is {engagement.authority_basis}",
-            )
 
-        # 4. Does the engagement permit the techniques this adapter needs?
+        # 4. Active scans require active_scan permission; explicit adapter techniques
+        #    are checked if declared on the adapter.
         needed = set(adapter.requires_techniques)
         if adapter.collection_mode == "active":
             needed.add(ACTIVE_TECHNIQUE)
@@ -264,15 +240,14 @@ class PolicyGate:
                 f"({state.spend_used} + {estimate} > {caps.max_spend_usd})",
             )
 
-        # 6. Does a human have to say yes first? Pause before reserving, so a
-        #    step waiting on approval is not sitting on budget.
+        # 6. Optional approval tier check (only when approval_tiers is configured).
         if adapter.tier in self.approval_tiers and not approved:
             return Decision(
                 "paused",
                 f"{adapter.name} is tier {adapter.tier} and needs analyst approval",
             )
 
-        # 7. Finally, the money.
+        # 7. Budget reservation for metered calls.
         if estimate > 0:
             try:
                 reservation = self.ledger.reserve(
@@ -286,8 +261,6 @@ class PolicyGate:
 
         return Decision("allowed", "free source, within authority")
 
-    # ---- logging ---------------------------------------------------------
-
     def _log(
         self,
         *,
@@ -299,12 +272,6 @@ class PolicyGate:
         decision: Decision,
         estimate: Decimal,
     ) -> None:
-        """Write the decision to the append-only query log.
-
-        In its own transaction, on purpose: a denial has no transaction to
-        join, and the record of an attempt should survive whatever happened
-        to the work it was attempting.
-        """
         with self.engine.begin() as conn:
             conn.execute(
                 schema.query_log.insert().values(

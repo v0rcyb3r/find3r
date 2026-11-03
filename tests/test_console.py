@@ -44,25 +44,42 @@ def workspace(engine, tmp_path):
 
 @pytest.fixture
 def client(workspace):
-    server = ThreadingHTTPServer(('127.0.0.1', 0), make_handler(workspace))
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    port = server.server_port
+    import socket
+
+    handler_cls = make_handler(workspace)
+
+    class _DummyServer:
+        server_port = 8765
+        server_name = '127.0.0.1'
+
+    dummy_server = _DummyServer()
 
     def request(path, method='GET', payload=None, headers=None):
-        conn = HTTPConnection('127.0.0.1', port, timeout=5)
+        s_client, s_server = socket.socketpair()
+        req_headers = {'Host': f'127.0.0.1:{dummy_server.server_port}'}
+        if headers:
+            req_headers.update(headers)
+
+        def _serve_one():
+            try:
+                handler_cls(s_server, ('127.0.0.1', 0), dummy_server)
+            finally:
+                s_server.close()
+
+        t = threading.Thread(target=_serve_one, daemon=True)
+        t.start()
+        conn = HTTPConnection('127.0.0.1', dummy_server.server_port, timeout=5)
+        conn.sock = s_client
         body = json.dumps(payload) if payload is not None else None
-        conn.request(method, path, body=body, headers=headers or {})
+        conn.request(method, path, body=body, headers=req_headers)
         response = conn.getresponse()
         data = response.read()
         result = (response.status, dict(response.getheaders()), data)
         conn.close()
+        t.join(timeout=2)
         return result
 
-    yield request, f'http://127.0.0.1:{port}'
-    server.shutdown()
-    server.server_close()
-    thread.join(timeout=2)
+    yield request, f'http://127.0.0.1:{dummy_server.server_port}'
 
 
 def test_workspace_serves_local_assets_and_real_snapshot(client):
@@ -212,7 +229,7 @@ def test_resolver_distinguishes_domain_candidate_from_person_identity(client, wo
     assert result['candidate_domains']==['example.com']
     assert result['requires_resolution'] is False
     assert result['domain_is_candidate'] is True
-    status, _, body = request('/api/resolve','POST', {'seed':'Dana Example','kind':'person'},headers)
+    status, _, body = request('/api/resolve','POST', {'seed':'Dana Example','kind':'name'},headers)
     assert status==202
     assert json.loads(body)['requires_resolution'] is True
 
@@ -349,3 +366,68 @@ def test_gmail_api_runs_exact_email_sources_without_company_association(client, 
         context=conn.execute(sa.select(schema.engagement).where(schema.engagement.c.authority_basis=='public_research')).mappings().one()
         assert context['authorized_domains']==[] and context['authorized_emails']==[email]
         assert not conn.execute(sa.select(schema.entity).where(schema.entity.c.canonical_name=='gmail.com')).first()
+
+
+def test_local_ollama_and_manually_installed_models(client, workspace, monkeypatch, tmp_path):
+    from neesha.runtime import ollama as ollama_mod
+    from neesha.runtime.investigation import analyze_brief
+    # Simulate offline manually installed models in ~/.ollama/models/manifests
+    manifest_file = tmp_path / 'manifests' / 'registry.ollama.ai' / 'library' / 'custom-osint' / 'latest'
+    manifest_file.parent.mkdir(parents=True)
+    manifest_file.write_text('{}')
+    hf_manifest = tmp_path / 'manifests' / 'hf.co' / 'sec-team' / 'osint-gguf' / 'Q4_K_M'
+    hf_manifest.parent.mkdir(parents=True)
+    hf_manifest.write_text('{}')
+    monkeypatch.setenv('OLLAMA_MODELS', str(tmp_path))
+    monkeypatch.setattr(ollama_mod, 'find_tool_binary', lambda name: '/usr/local/bin/ollama')
+
+    # Verify offline manifest scanner picks up manual models when HTTP tags are empty
+    scanned = ollama_mod._scan_offline_manifests()
+    scanned_ids = [m['id'] for m in scanned]
+    assert 'custom-osint:latest' in scanned_ids
+    assert 'hf.co/sec-team/osint-gguf:Q4_K_M' in scanned_ids
+
+    monkeypatch.setattr(ollama_mod, 'list_installed_models', lambda *a, **kw: (True, scanned))
+    request, origin = client
+    headers = {'Origin': origin, 'X-Workspace-Token': workspace.token}
+
+    # Custom/manual model tag with slash namespace can be selected via API
+    st, _, body = request('/api/ollama/select', 'POST', {'model': 'hf.co/sec-team/osint-gguf:Q4_K_M'}, headers)
+    assert st == 202
+    data = json.loads(body)
+    assert data['selected_model'] == 'hf.co/sec-team/osint-gguf:Q4_K_M'
+    # Manually installed models appear first in catalog
+    catalog_ids = [c['id'] for c in data['catalog']]
+    assert catalog_ids[0] in ('custom-osint:latest', 'hf.co/sec-team/osint-gguf:Q4_K_M')
+
+    # Import a local .gguf file directly through the platform API (/api/ollama/create)
+    gguf_file = tmp_path / 'my-weights.gguf'
+    gguf_file.write_bytes(b'GGUF')
+    monkeypatch.setattr(ollama_mod, 'ensure_ollama_running', lambda **kw: True)
+    class DummyProc:
+        returncode = 0
+        stdout = 'success'
+    monkeypatch.setattr(ollama_mod.subprocess, 'run', lambda *a, **kw: DummyProc())
+    st_create, _, body_create = request('/api/ollama/create', 'POST', {
+        'name': 'imported-osint',
+        'source': str(gguf_file),
+    }, headers)
+    assert st_create == 202
+    created_data = json.loads(body_create)
+    assert created_data['selected_model'] == 'imported-osint:latest'
+    assert created_data['created_model'] == 'imported-osint:latest'
+
+    # Run $0.00 synthesis with manually installed model
+    monkeypatch.setattr('neesha.runtime.investigation.generate_ollama',
+        lambda *a, **kw: '<think>reasoning</think>{"claims":[{"text":"Example DNS resolves","evidence_ids":["f1"]}]}')
+    brief = {
+        'subject_kind': 'domain',
+        'seed': {'input': 'example.com', 'normalized': 'example.com'},
+        'facts': [{'fact_id': 'f1', 'source_record_id': 's1', 'subject': 'example.com', 'attribute': 'dns.a', 'value': '93.184.216.34', 'sensitivity': 'business'}],
+    }
+    res = analyze_brief(workspace.engine, brief, 'single', ['ollama:hf.co/sec-team/osint-gguf:Q4_K_M'])
+    assert res['status'] == 'complete'
+    assert res['spend_usd'] == '0'
+    assert len(res['claims']) == 1
+    assert res['claims'][0]['retrieved_by']['model'] == 'hf.co/sec-team/osint-gguf:Q4_K_M'
+

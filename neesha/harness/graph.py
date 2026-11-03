@@ -12,7 +12,7 @@ def build_graph(company: str, facts: list[dict], subject_kind: str = "company") 
         nodes.setdefault(identity, {'id':identity,'kind':kind,'label':label})
         return identity
 
-    root_kind = subject_kind if subject_kind in ('email', 'username') else None
+    root_kind = subject_kind if subject_kind in ('email', 'username', 'ip', 'phone', 'person') else None
     org = None if root_kind else node('organization', company.lower(), company)
     seed = (node(root_kind, company, company) if root_kind
             else node('domain', company.lower(), company.lower()))
@@ -48,16 +48,20 @@ def build_graph(company: str, facts: list[dict], subject_kind: str = "company") 
             continue
         if fact.get('entity_id') is not None and not isinstance(fact['entity_id'], str):
             continue
-        if root_kind:
+        if root_kind in ('email', 'username'):
             # Public provider metadata is not proof of identity, ownership, or
             # account registration. Never create a person/company from a label.
-            if not attr.startswith('public.'):
+            if not attr.startswith(('public.', 'intelx.')):
                 continue
             if attr == 'public.account.found' or attr.startswith('public.account.found'):
-                # An enumerated account existence: show it as an account tied to
-                # the exact email, labelled by the service. Evidence-backed only.
                 account = node('account', str(fact.get('source', '')) + ':' + value, value)
                 link(seed, account, 'account_observed', fact)
+            elif attr == 'public.email.handle_correlation':
+                account = node('account', 'handle:' + value, value)
+                link(seed, account, 'handle_correlation', fact)
+            elif attr == 'public.email.mx_host':
+                mx_node = node('domain', value.lower(), value)
+                link(seed, mx_node, 'mail_exchange', fact)
             elif attr.startswith('public.account.summary'):
                 continue  # a count, not an entity to draw
             elif attr.endswith('.url') or attr.endswith('_url'):
@@ -70,6 +74,20 @@ def build_graph(company: str, facts: list[dict], subject_kind: str = "company") 
                 observation = node('observation', attr + ':' + value, attr + ' = ' + value)
                 link(seed, observation, 'public_provider_metadata', fact)
             continue
+        if root_kind in ('ip', 'phone', 'person'):
+            if attr == 'host.reverse_dns':
+                dom = node('domain', value.lower(), value)
+                link(seed, dom, 'reverse_dns', fact)
+            elif attr in ('whois.org', 'host.org'):
+                org_node = node('organization', value.lower(), value)
+                link(seed, org_node, 'registered_to', fact)
+            elif attr.endswith('.url') or attr.endswith('_url'):
+                url_node = node('url', value, value)
+                link(seed, url_node, 'observed_url', fact)
+            else:
+                observation = node('observation', attr + ':' + value, attr + ' = ' + value)
+                link(seed, observation, 'observed', fact)
+            continue
         person=None
         if attr.startswith('person.'):
             # A record-scoped fallback deliberately refuses cross-source name joins.
@@ -77,6 +95,15 @@ def build_graph(company: str, facts: list[dict], subject_kind: str = "company") 
             person=node('person',key,subject)
             if attr=='person.role':
                 link(person,org,'published_role: '+value,fact)
+            elif attr=='person.department':
+                obs=node('observation',attr+':'+value,'department: '+value)
+                link(person,obs,'department',fact)
+            elif attr=='person.linkedin_url':
+                url=node('url',value,value)
+                link(person,url,'social_profile',fact)
+            elif attr=='person.twitter_handle':
+                acct=node('account','twitter:'+value,'@'+value.lstrip('@'))
+                link(person,acct,'social_account',fact)
         if attr in ('dns.subdomain','discovery.subdomain'):
             domain=node('domain',value.lower(),value)
             link(domain,seed,'subdomain_of',fact)
@@ -84,16 +111,27 @@ def build_graph(company: str, facts: list[dict], subject_kind: str = "company") 
             ip=node('ip',value,value)
             host=node('domain',subject.lower(),subject)
             link(host,ip,'historical_dns' if attr.startswith('dns.passive') else 'resolved_to',fact)
+        elif attr == 'host.reverse_dns':
+            ip_node = node('ip', subject, subject)
+            dom = node('domain', value.lower(), value)
+            link(ip_node, dom, 'reverse_dns', fact)
+        elif attr.startswith('host.'):
+            target_parent = node('ip', subject, subject) if re.match(r'^\d{1,3}(?:\.\d{1,3}){3}$', subject) else seed
+            obs = node('observation', attr + ':' + value, attr + ' = ' + value)
+            link(target_parent, obs, 'host_telemetry', fact)
         elif attr in ('company.business_email','person.business_email'):
             email=node('email',value.lower(),value)
             link(person or org,email,'published_business_email',fact)
         elif attr in ('company.business_phone','person.business_phone'):
             phone=node('phone',company+':'+re.sub(r'[^\d+]','',value),value)
             link(person or org,phone,'published_business_phone',fact)
+        elif attr == 'company.social_url':
+            url=node('url',value,value)
+            link(org or seed,url,'social_profile',fact)
         elif attr in ('company.contact_page','person.profile_url','web.archive.url','web.observed.url'):
             url=node('url',value,value)
             link(person or seed,url,'archived_url' if attr=='web.archive.url' else 'observed_url',fact)
-        elif attr.startswith(('http.','tls.','email.','dns.')):
+        elif attr.startswith(('http.','tls.','email.','dns.','dnssec.','whois.','tech.','web.','intelx.')):
             observation=node('observation',attr+':'+value,attr+' = '+value)
             link(seed,observation,'observed',fact)
     return {'nodes':list(nodes.values()),'edges':list(edges.values()),
