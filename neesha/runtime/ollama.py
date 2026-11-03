@@ -193,8 +193,29 @@ def list_installed_models(timeout: float = 1.5) -> tuple[bool, list[dict[str, An
     return True, installed
 
 
-def ollama_status(*, start_daemon: bool = False) -> dict[str, Any]:
+_STATUS_CACHE: tuple[float, tuple[Any, ...], dict[str, Any]] | None = None
+
+
+def invalidate_ollama_cache() -> None:
+    global _STATUS_CACHE
+    _STATUS_CACHE = None
+
+
+def ollama_status(*, start_daemon: bool = False, force: bool = False) -> dict[str, Any]:
     """Return full status of the local Ollama installation, daemon, pulled models, and catalog."""
+    global _STATUS_CACHE
+    cache_key = (
+        id(find_tool_binary),
+        id(list_installed_models),
+        os.environ.get("NEESHA_OLLAMA_MODEL", ""),
+        os.environ.get("OLLAMA_MODELS", ""),
+    )
+    now = time.monotonic()
+    if not force and not start_daemon and _STATUS_CACHE is not None:
+        ts, k, cached = _STATUS_CACHE
+        if k == cache_key and (now - ts) < 3.5:
+            return dict(cached)
+
     ensure_tool_paths_in_env()
     binary = find_tool_binary("ollama")
     if start_daemon and binary and not is_daemon_reachable(timeout=0.5):
@@ -266,7 +287,7 @@ def ollama_status(*, start_daemon: bool = False) -> dict[str, Any]:
     else:
         reason = f"Ollama online ({len(installed_models)} local model(s) pulled). Click Pull Model to download {selected}."
 
-    return {
+    res = {
         "installed": bool(binary),
         "binary_path": binary,
         "daemon_running": daemon_up,
@@ -278,6 +299,8 @@ def ollama_status(*, start_daemon: bool = False) -> dict[str, Any]:
         "reason": reason,
         "endpoint": OLLAMA_HOST,
     }
+    _STATUS_CACHE = (time.monotonic(), cache_key, res)
+    return dict(res)
 
 
 def pull_ollama_model(model: str) -> dict[str, Any]:
@@ -314,7 +337,7 @@ def pull_ollama_model(model: str) -> dict[str, Any]:
         raise RuntimeError(f"Ollama pull failed for {target_model}: {tail}")
 
     os.environ["NEESHA_OLLAMA_MODEL"] = target_model
-    status = ollama_status()
+    status = ollama_status(force=True)
     status["pulled_model"] = target_model
     status["message"] = f"Pulled local model {target_model} and set it as active."
     return status
@@ -414,7 +437,7 @@ def create_custom_ollama_model(name: str, source: str) -> dict[str, Any]:
         raise ValueError(f"Ollama create failed for {target_name}. Verify the base model tag or weights file format.")
 
     os.environ["NEESHA_OLLAMA_MODEL"] = target_name
-    status = ollama_status()
+    status = ollama_status(force=True)
     status["created_model"] = target_name
     status["message"] = f"Imported and registered local model {target_name}."
     return status

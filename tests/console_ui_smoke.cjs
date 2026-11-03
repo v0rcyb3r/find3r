@@ -14,7 +14,7 @@ class Element {
 function matches(el,selector){if(selector==='input:checked')return el.tagName==='input'&&el.checked;if(selector==='input')return el.tagName==='input';if(selector.startsWith('.'))return el.className.split(' ').includes(selector.slice(1));return false;}
 const elements={};const html=fs.readFileSync('neesha/console/static/index.html','utf8');
 for(const match of html.matchAll(/id="([^"]+)"/g))elements['#'+match[1]]=new Element();
-const tabs=['overview','map','infrastructure','people','graph','evidence','analysis'].map(name=>{const e=new Element('button');e.dataset={tab:name};return e;});
+const tabs=['overview','map','infrastructure','people','graph','operations','evidence','analysis'].map(name=>{const e=new Element('button');e.dataset={tab:name};return e;});
 const modes=['deterministic','single','multi'].map(value=>{const e=new Element('input');e.value=value;return e;});modes[0].checked=true;
 const data={runs:[],sources:[],runtime_providers:[{provider:'openai',ready:true,model:'explicit-model'},{provider:'anthropic',ready:true,model:'explicit-model'}],budget:{period:'2026-11',committed:'0',cap:'10'},job:{state:'idle'}};
 const requests=[];
@@ -57,6 +57,13 @@ vm.runInContext(fs.readFileSync('neesha/console/static/app.js','utf8'),context);
  assert.match(elements['#view'].textContent,/Offline vector Geo-IP & ASN topology map/);
  assert.match(elements['#view'].textContent,/Source Connection Chart/);
  assert.match(elements['#view'].textContent,/Export Maltego \(\.graphml\)/);
+ vm.runInContext("tab='operations';renderView();",context);
+ assert.match(elements['#view'].textContent,/Temporal Attack Surface Diff/);
+ assert.match(elements['#view'].textContent,/Operation Cases/);
+ assert.match(elements['#view'].textContent,/Analysis of Competing Hypotheses/);
+ vm.runInContext("openCmdK()",context);
+ assert.ok(elements['#cmdk-dialog'].open);
+ assert.equal(elements['#context-drawer'].hidden, false);
  vm.runInContext("openOperatorDialog()",context);
  assert.ok(elements['#operator-dialog'].open);
  console.log('Workspace UI state/render smoke checks passed.');

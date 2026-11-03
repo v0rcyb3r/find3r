@@ -36,6 +36,8 @@ from neesha.adapters.amass import AmassAdapter
 from neesha.adapters.email_osint import EmailOsintAdapter
 from neesha.adapters.username_osint import UsernameOsintAdapter
 from neesha.adapters.theharvester import TheHarvesterAdapter
+from neesha.adapters.ripestat import RipestatAdapter
+from neesha.adapters.wellknown import SecurityTxtAdapter
 
 _REGISTERED: tuple[Type[BaseAdapter], ...] = (
     CrtShAdapter,
@@ -50,6 +52,8 @@ _REGISTERED: tuple[Type[BaseAdapter], ...] = (
     TheHarvesterAdapter,
     RdapAdapter,
     InternetDbAdapter,
+    RipestatAdapter,
+    SecurityTxtAdapter,
     HackerTargetAdapter,
     IntelXAdapter,
     DeHashedAdapter,

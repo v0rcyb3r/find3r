@@ -19,6 +19,8 @@
 <header>
   <a class="wordmark" href="/">FIND3R<span>INTELLIGENCE SYSTEMS</span></a>
   <div class="top-status">
+    <button type="button" class="tag operator-badge-btn" id="open-cmdk" title="Open Command &amp; Pivot Palette (Cmd+K / Ctrl+K)">COMMAND PALETTE · CMD+K</button>
+    <span class="divider">/</span>
     <button type="button" class="tag operator-badge-btn" id="operator-login-btn" title="Operator Session &amp; Team Access">OPERATOR LOGIN · STAGED</button>
     <span class="divider">/</span>
     <button class="text-button" id="open-settings" type="button">API KEYS &amp; SETTINGS</button>
@@ -134,16 +136,16 @@
           </div>
           <div class="workbench-overview-cards">
             <div class="posture-card">
-              <div class="posture-card-top"><h3>PARALLEL OSINT SENSORS</h3><span class="tag">24 ADAPTERS</span></div>
-              <p>DNS/DNSSEC, TLS certificates, HTTP headers, RDAP/WHOIS, Shodan InternetDB, passive DNS, Wayback, URLScan, Hunter, IntelX, Holehe, Sherlock, Maigret, Socialscan, Subfinder, Amass &amp; theHarvester.</p>
+              <div class="posture-card-top"><h3>PARALLEL OSINT SENSORS</h3><span class="tag">26 ADAPTERS</span></div>
+              <p>DNS/DNSSEC, TLS certificates, HTTP headers, security.txt, RIPEstat BGP/ASN, RDAP/WHOIS, Shodan, passive DNS, Wayback, URLScan, Hunter, IntelX, Holehe, Sherlock, Maigret, Socialscan, Subfinder, Amass &amp; theHarvester.</p>
             </div>
             <div class="posture-card">
-              <div class="posture-card-top"><h3>EPHEMERAL VULTR CLOUD</h3><span class="tag">UBUNTU 24.04</span></div>
-              <p>Provision randomized, unattributable Ubuntu 24.04 LTS VPS nodes on Vultr API v2 to execute all 24 OSINT sensors remotely over SSH or share with teammates.</p>
+              <div class="posture-card-top"><h3>OPERATIONS &amp; DIFF ENGINE</h3><span class="tag">MULTI-RUN FUSION</span></div>
+              <p>Group related seeds into Operation Dossiers with cross-target correlation, diff attack surface changes across runs, score competing hypotheses (ACH), and export STIX 2.1 or Maltego graphs.</p>
             </div>
             <div class="posture-card">
-              <div class="posture-card-top"><h3>1-CLICK SELECTOR PIVOT</h3><span class="tag">INSPECTOR DRAWER</span></div>
-              <p>Click any Admiralty grade badge in a dossier to inspect the cryptographic SHA-256 source record and pivot into any discovered subdomain, IP, email, or handle in one click.</p>
+              <div class="posture-card-top"><h3>1-CLICK SELECTOR PIVOT</h3><span class="tag">SPLIT INSPECTOR</span></div>
+              <p>Click any node on the Geo-IP Map, Source Connection Chart, or Evidence Graph to inspect provenance side-by-side in the persistent drawer, pin findings, or expand multi-hop transforms.</p>
             </div>
           </div>
         </section>
@@ -153,10 +155,13 @@
             <button id="back" class="back" type="button">Overview Canvas</button>
             <div class="export-actions">
               <button class="secondary" id="pivot-current-btn" type="button">Re-Scan Target</button>
+              <button class="secondary" id="toggle-drawer-btn" type="button">Inspector Drawer</button>
+              <button class="secondary" id="export-stix" type="button">STIX 2.1 (.json)</button>
               <button class="secondary" id="export-maltego-graphml" type="button">Maltego (.graphml)</button>
               <button class="secondary" id="export-maltego-csv" type="button">Maltego (.csv)</button>
-              <button class="secondary" id="export-report" type="button">Export Dossier (.md)</button>
-              <button class="secondary" id="export" type="button">Export JSON</button>
+              <button class="secondary" id="export-dossier-html" type="button">Executive Dossier (.html)</button>
+              <button class="secondary" id="export-report" type="button">Markdown (.md)</button>
+              <button class="secondary" id="export" type="button">JSON</button>
               <button class="danger-button" id="delete-run" type="button">Delete</button>
             </div>
           </div>
@@ -171,13 +176,26 @@
           <div class="tabs" role="tablist" aria-label="Investigation views">
             <button role="tab" aria-selected="true" data-tab="overview">Overview &amp; Posture</button>
             <button role="tab" aria-selected="false" data-tab="map">Geo-IP &amp; Attack Map</button>
+            <button role="tab" aria-selected="false" data-tab="operations">Operations &amp; Diff</button>
             <button role="tab" aria-selected="false" data-tab="infrastructure">Infrastructure</button>
             <button role="tab" aria-selected="false" data-tab="people">People &amp; Footprint</button>
             <button role="tab" aria-selected="false" data-tab="graph">Evidence Graph</button>
             <button role="tab" aria-selected="false" data-tab="evidence">All Evidence</button>
             <button role="tab" aria-selected="false" data-tab="analysis">Agent Harness</button>
           </div>
-          <div id="view"></div>
+          <div class="detail-split-layout" id="detail-split-layout">
+            <div id="view"></div>
+            <aside id="context-drawer" class="context-drawer" aria-label="Persistent Context &amp; Transform Inspector" hidden>
+              <div class="context-drawer-head">
+                <span class="eyebrow">CONTEXT INSPECTOR &amp; TRANSFORM</span>
+                <div class="export-actions">
+                  <button type="button" class="secondary" id="expand-drawer-modal">Full View</button>
+                  <button type="button" class="secondary" id="close-context-drawer">Hide</button>
+                </div>
+              </div>
+              <div id="context-drawer-body" class="context-drawer-body"></div>
+            </aside>
+          </div>
         </section>
       </div>
     </div>
@@ -305,6 +323,16 @@
       <button class="primary" type="submit" id="save-operator">Apply Operator Tag</button>
     </div>
   </form>
+</dialog>
+<dialog id="cmdk-dialog" class="cmdk-dialog">
+  <div class="dialog-head">
+    <span class="eyebrow">GLOBAL COMMAND, ENTITY SEARCH &amp; PIVOT PALETTE</span>
+    <button id="close-cmdk" type="button" aria-label="Close command palette">Close</button>
+  </div>
+  <div class="cmdk-body">
+    <input id="cmdk-input" class="filter-input cmdk-input" type="text" placeholder="Search targets, IPs, subdomains, emails, cases, or type a command (e.g. pivot, diff, stix, ollama)…" aria-label="Command palette search" autocomplete="off" spellcheck="false">
+    <div id="cmdk-results" class="cmdk-results"></div>
+  </div>
 </dialog>
 </body>
 </html>

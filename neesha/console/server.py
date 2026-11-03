@@ -93,9 +93,12 @@ class Workspace:
         self.job = {'state': 'idle'}
         self.analyzing: set[str] = set()
         self._catalog_cache: tuple[float, list[dict]] | None = None
+        self._brief_cache: dict[str, tuple[float, dict]] = {}
         self._load_saved_settings()
         from neesha.cloud.vultr import VultrManager
+        from neesha.harness.operations import OperationsManager
         self.vultr = VultrManager(self.profile_path.parent)
+        self.operations = OperationsManager(self.profile_path.parent / "operations-store.json")
 
     def _load_saved_settings(self):
         if not self.settings_path.exists():
@@ -158,6 +161,7 @@ class Workspace:
             'ollama': ollama_status(),
             'service_profile_configured': self.profile_path.exists(),
             'cloud': self.vultr.list_nodes(sync_remote=False),
+            'operations': self.operations.snapshot(),
             'host_os': detect_os_platform(),
         }
 
@@ -327,10 +331,18 @@ class Workspace:
             temporary.write_text(json.dumps(payload, indent=2) + '\n')
             temporary.replace(self.profile_path)
             harden_path(self.profile_path)
+            self._brief_cache.clear()
         return {'configured': True}
 
     def brief(self, run_id):
-        brief = build_brief(self.engine, run_id, self.profile())
+        now = time.monotonic()
+        cached = self._brief_cache.get(run_id)
+        if cached and (now - cached[0]) < 15.0 and self.job.get('run_id') != run_id:
+            brief = dict(cached[1])
+        else:
+            brief = build_brief(self.engine, run_id, self.profile())
+            if brief.get('status') in ('complete', 'stopped'):
+                self._brief_cache[run_id] = (now, dict(brief))
         path = self._analysis_path(run_id)
         if path.exists():
             try:
@@ -339,6 +351,12 @@ class Workspace:
                 brief['model_analysis'] = json.loads(path.read_text())
             except (OSError, ValueError):
                 brief['analysis_error'] = 'Stored model report could not be read.'
+        ops_snap = self.operations.snapshot(run_id=run_id)
+        ops_snap['hypotheses'] = self.operations.score_hypotheses(
+            ops_snap.get('hypotheses') or [],
+            brief.get('facts') or [],
+        )
+        brief['operations'] = ops_snap
         return brief
 
     def _analysis_path(self, run_id):
@@ -389,6 +407,7 @@ class Workspace:
             if self.job['state'] == 'running' or self.analyzing:
                 raise ValueError('Wait for collection and model analysis to finish before deleting an investigation.')
             result = delete_investigation(self.engine, run_id, self.reports_root)
+            self._brief_cache.pop(run_id, None)
             if self.job.get('run_id') == run_id:
                 self.job = {'state': 'idle'}
             return result
@@ -554,9 +573,16 @@ def make_handler(workspace: Workspace):
             return True
 
         def _send(self, status, body, content_type='application/json'):
+            import gzip
             data = body if isinstance(body, bytes) else json.dumps(body, default=str).encode()
+            accept_enc = (self.headers.get('Accept-Encoding') or '').lower()
+            use_gzip = 'gzip' in accept_enc and len(data) >= 1024
+            if use_gzip:
+                data = gzip.compress(data, compresslevel=5)
             self.send_response(status)
             self.send_header('Content-Type', content_type)
+            if use_gzip:
+                self.send_header('Content-Encoding', 'gzip')
             self.send_header('Content-Length', str(len(data)))
             self.send_header('Cache-Control', 'no-store')
             self.send_header('X-Content-Type-Options', 'nosniff')
@@ -591,6 +617,12 @@ def make_handler(workspace: Workspace):
                 return self._send(200, ollama_status())
             if path == '/api/cloud/nodes':
                 return self._send(200, workspace.vultr.list_nodes(sync_remote=False))
+            if path.startswith('/api/operations/cases/'):
+                case_id = path.removeprefix('/api/operations/cases/').strip('/')
+                try:
+                    return self._send(200, workspace.operations.build_case_dossier(case_id, workspace.brief))
+                except ValueError as exc:
+                    return self._send(404, {'error': str(exc)})
             if path.startswith('/api/tools/preinstall/'):
                 from neesha.adapters.tool_installer import generate_preinstall_script
                 target_os = path.removeprefix('/api/tools/preinstall/')
@@ -598,8 +630,25 @@ def make_handler(workspace: Workspace):
                 return self._send(200, {'filename': filename, 'content_type': content_type, 'script': script_body})
             if path.startswith('/api/runs/'):
                 tail = path.removeprefix('/api/runs/')
-                if tail.endswith('/maltego.graphml') or tail.endswith('/maltego.csv'):
-                    from neesha.harness.mapping import build_maltego_csv, build_maltego_graphml
+                if '/diff/' in tail:
+                    from neesha.harness.operations import diff_briefs
+                    run_a, run_b = tail.split('/diff/', 1)
+                    for r_chk in (run_a, run_b):
+                        if len(r_chk) != 32 or any(c not in '0123456789abcdef' for c in r_chk):
+                            return self._send(404, {'error': 'Run not found.'})
+                    try:
+                        return self._send(200, diff_briefs(workspace.brief(run_a), workspace.brief(run_b)))
+                    except sa.exc.NoResultFound:
+                        return self._send(404, {'error': 'Run not found.'})
+                    except ValueError as exc:
+                        return self._send(400, {'error': str(exc)})
+                if tail.endswith(('/maltego.graphml', '/maltego.csv', '/stix.json', '/dossier.html')):
+                    from neesha.harness.mapping import (
+                        build_html_dossier,
+                        build_maltego_csv,
+                        build_maltego_graphml,
+                        build_stix_bundle,
+                    )
                     run_id, fmt = tail.split('/', 1)
                     if len(run_id) != 32 or any(c not in '0123456789abcdef' for c in run_id):
                         return self._send(404, {'error': 'Run not found.'})
@@ -607,7 +656,11 @@ def make_handler(workspace: Workspace):
                         b = workspace.brief(run_id)
                         if fmt == 'maltego.graphml':
                             return self._send(200, {'filename': f'find3r-{run_id}-maltego.graphml', 'content_type': 'application/graphml+xml; charset=utf-8', 'content': build_maltego_graphml(b)})
-                        return self._send(200, {'filename': f'find3r-{run_id}-maltego.csv', 'content_type': 'text/csv; charset=utf-8', 'content': build_maltego_csv(b)})
+                        if fmt == 'maltego.csv':
+                            return self._send(200, {'filename': f'find3r-{run_id}-maltego.csv', 'content_type': 'text/csv; charset=utf-8', 'content': build_maltego_csv(b)})
+                        if fmt == 'stix.json':
+                            return self._send(200, {'filename': f'find3r-{run_id}-stix21.json', 'content_type': 'application/stix+json; charset=utf-8', 'content': build_stix_bundle(b)})
+                        return self._send(200, {'filename': f'find3r-{run_id}-dossier.html', 'content_type': 'text/html; charset=utf-8', 'content': build_html_dossier(b)})
                     except sa.exc.NoResultFound:
                         return self._send(404, {'error': 'Run not found.'})
                     except ValueError as exc:
@@ -643,6 +696,9 @@ def make_handler(workspace: Workspace):
                 '/api/tools/install', '/api/tools/refresh',
                 '/api/ollama/select', '/api/ollama/pull', '/api/ollama/create', '/api/ollama/install',
                 '/api/cloud/spinup', '/api/cloud/destroy', '/api/cloud/select', '/api/cloud/rotate', '/api/cloud/sync',
+                '/api/operations/cases', '/api/operations/cases/delete',
+                '/api/operations/pin', '/api/operations/note', '/api/operations/note/delete',
+                '/api/operations/hypothesis', '/api/operations/hypothesis/delete',
             )
             if parsed_path not in allowed_posts and not analysis_path:
                 return self._send(404, {'error': 'Not found.'})
@@ -688,6 +744,24 @@ def make_handler(workspace: Workspace):
                     result = workspace.vultr.rotate_node(region=str(payload.get('region', 'random')))
                 elif parsed_path == '/api/cloud/sync':
                     result = workspace.vultr.list_nodes(sync_remote=True)
+                elif parsed_path == '/api/operations/cases':
+                    result = workspace.operations.save_case(payload)
+                elif parsed_path == '/api/operations/cases/delete':
+                    result = workspace.operations.delete_case(str(payload.get('id', '')))
+                elif parsed_path == '/api/operations/pin':
+                    result = workspace.operations.toggle_pin(payload)
+                elif parsed_path == '/api/operations/note':
+                    result = workspace.operations.add_note(payload)
+                elif parsed_path == '/api/operations/note/delete':
+                    result = workspace.operations.delete_note(str(payload.get('id', '')), str(payload.get('run_id', '')))
+                elif parsed_path == '/api/operations/hypothesis':
+                    rid = str(payload.get('run_id', '')).strip()
+                    facts = workspace.brief(rid).get('facts', []) if len(rid) == 32 else []
+                    result = workspace.operations.save_hypothesis(payload, facts)
+                elif parsed_path == '/api/operations/hypothesis/delete':
+                    rid = str(payload.get('run_id', '')).strip()
+                    facts = workspace.brief(rid).get('facts', []) if len(rid) == 32 else []
+                    result = workspace.operations.delete_hypothesis(str(payload.get('id', '')), rid, facts)
                 elif analysis_path:
                     run_id = path_parts[3]
                     if len(run_id) != 32 or any(c not in '0123456789abcdef' for c in run_id):

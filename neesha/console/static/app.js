@@ -98,6 +98,193 @@ function sourceButton(fact) {
   return b;
 }
 
+function syncContextDrawer(titleText) {
+  const drawer = $('#context-drawer');
+  const drawerBody = $('#context-drawer-body');
+  const splitLayout = $('#detail-split-layout');
+  const srcContent = $('#source-content');
+  if (!drawer || !drawerBody || !srcContent) return;
+  if ($('#drawer-title') && titleText) {
+    $('#drawer-title').textContent = titleText;
+  }
+  drawerBody.replaceChildren();
+  const nodes = Array.from(srcContent.childNodes || srcContent.children || []);
+  nodes.forEach(node => {
+    drawerBody.append(node.cloneNode ? node.cloneNode(true) : node);
+  });
+  // Rebind interactive buttons inside the cloned drawer body
+  const origBtns = srcContent.querySelectorAll('button');
+  const clonedBtns = drawerBody.querySelectorAll('button');
+  origBtns.forEach((btn, idx) => {
+    if (clonedBtns[idx] && btn.onclick) {
+      clonedBtns[idx].onclick = btn.onclick;
+    }
+  });
+  drawer.hidden = false;
+  if (splitLayout?.classList) {
+    if (splitLayout.classList.add) splitLayout.classList.add('drawer-open');
+    else if (splitLayout.classList.toggle) splitLayout.classList.toggle('drawer-open', true);
+  }
+}
+
+function closeContextDrawer() {
+  const drawer = $('#context-drawer');
+  const splitLayout = $('#detail-split-layout');
+  if (drawer) drawer.hidden = true;
+  if (splitLayout?.classList) {
+    if (splitLayout.classList.remove) splitLayout.classList.remove('drawer-open');
+    else if (splitLayout.classList.toggle) splitLayout.classList.toggle('drawer-open', false);
+  }
+}
+
+if ($('#toggle-drawer-btn')) {
+  $('#toggle-drawer-btn').onclick = () => {
+    const drawer = $('#context-drawer');
+    if (!drawer) return;
+    if (drawer.hidden) {
+      drawer.hidden = false;
+      const splitLayout = $('#detail-split-layout');
+      if (splitLayout?.classList?.add) splitLayout.classList.add('drawer-open');
+      else if (splitLayout?.classList?.toggle) splitLayout.classList.toggle('drawer-open', true);
+    } else {
+      closeContextDrawer();
+    }
+  };
+}
+if ($('#drawer-close-btn')) $('#drawer-close-btn').onclick = closeContextDrawer;
+if ($('#drawer-modal-btn')) {
+  $('#drawer-modal-btn').onclick = () => {
+    $('#source-dialog')?.showModal();
+  };
+}
+
+async function pinFactToOperations(fact) {
+  if (!fact) return;
+  try {
+    const res = await api('/api/operations/pin', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-Workspace-Token': session},
+      body: JSON.stringify({
+        fact_id: fact.fact_id,
+        run_id: brief?.run_id || '',
+        subject: fact.subject || subjectLabel(),
+        attribute: fact.attribute,
+        value: fact.value,
+        source: fact.source,
+        admiralty: fact.admiralty || 'C3',
+      }),
+    });
+    if (snapshot) snapshot.operations = res.operations;
+    message(res.pinned ? `Pinned finding [${fact.attribute}] to Operations Pinboard.` : `Unpinned finding [${fact.attribute}].`);
+    if (tab === 'operations') renderView();
+  } catch (err) {
+    message(err.message, true);
+  }
+}
+
+async function expandEntityNodeInPlace(selectorValue) {
+  if (!brief || !selectorValue) return;
+  const target = String(selectorValue).trim().toLowerCase();
+  let addedFacts = 0;
+  const existingIds = new Set((brief.facts || []).map(f => f.fact_id));
+  const runs = snapshot?.runs || [];
+  for (const r of runs.slice(0, 12)) {
+    if (r.id === brief.run_id) continue;
+    try {
+      const other = await api(`/api/runs/${encodeURIComponent(r.id)}`);
+      const matching = (other.facts || []).filter(f =>
+        !existingIds.has(f.fact_id) &&
+        (String(f.subject || '').toLowerCase().includes(target) ||
+         String(f.value || '').toLowerCase().includes(target))
+      );
+      matching.forEach(f => {
+        existingIds.add(f.fact_id);
+        brief.facts.push(f);
+        addedFacts++;
+      });
+      if (matching.length && other.graph && brief.graph) {
+        const nodeIds = new Set((brief.graph.nodes || []).map(n => n.id));
+        (other.graph.nodes || []).forEach(n => {
+          if (!nodeIds.has(n.id) && (String(n.label || '').toLowerCase().includes(target) || matching.some(f => f.subject === n.label || f.value === n.label))) {
+            nodeIds.add(n.id);
+            brief.graph.nodes.push(n);
+          }
+        });
+        (other.graph.edges || []).forEach(e => {
+          if (nodeIds.has(e.source) && nodeIds.has(e.target)) {
+            const exists = (brief.graph.edges || []).some(x => x.source === e.source && x.target === e.target && x.kind === e.kind);
+            if (!exists) brief.graph.edges.push(e);
+          }
+        });
+      }
+    } catch {
+      // Ignore individual run load errors during multi-hop expansion
+    }
+  }
+  if (addedFacts > 0) {
+    message(`Expanded "${selectorValue}" in place: merged ${addedFacts} correlated observation(s) from stored workspace runs.`);
+    renderView();
+  } else {
+    message(`No additional cached observations for "${selectorValue}" in stored runs. Use Pivot to launch a live scan.`);
+  }
+}
+
+function attachInteractiveSvgPanZoom(svg) {
+  if (!svg) return;
+  const vbAttr = svg.getAttribute ? svg.getAttribute('viewBox') : svg.attrs?.viewBox;
+  if (!vbAttr) return;
+  const initial = vbAttr.split(/\s+/).map(Number);
+  if (initial.length !== 4 || initial.some(Number.isNaN)) return;
+  let [vx, vy, vw, vh] = initial;
+  let dragging = false;
+  let startX = 0, startY = 0;
+
+  svg.style.cursor = 'grab';
+  svg.addEventListener('wheel', e => {
+    e.preventDefault();
+    const factor = e.deltaY < 0 ? 0.88 : 1.14;
+    const newW = Math.max(initial[2] * 0.25, Math.min(initial[2] * 2.5, vw * factor));
+    const newH = Math.max(initial[3] * 0.25, Math.min(initial[3] * 2.5, vh * factor));
+    vx += (vw - newW) / 2;
+    vy += (vh - newH) / 2;
+    vw = newW;
+    vh = newH;
+    svg.setAttribute('viewBox', `${Math.round(vx)} ${Math.round(vy)} ${Math.round(vw)} ${Math.round(vh)}`);
+  }, {passive: false});
+
+  svg.addEventListener('mousedown', e => {
+    if (e.target?.closest?.('g.graph-node-group, g.geo-pin, g.radial-source-group, g.radial-entity-group')) return;
+    dragging = true;
+    startX = e.clientX;
+    startY = e.clientY;
+    svg.style.cursor = 'grabbing';
+  });
+
+  svg.addEventListener('mousemove', e => {
+    if (!dragging) return;
+    const dx = (e.clientX - startX) * (vw / Math.max(300, svg.clientWidth || 800));
+    const dy = (e.clientY - startY) * (vh / Math.max(200, svg.clientHeight || 450));
+    startX = e.clientX;
+    startY = e.clientY;
+    vx -= dx;
+    vy -= dy;
+    svg.setAttribute('viewBox', `${Math.round(vx)} ${Math.round(vy)} ${Math.round(vw)} ${Math.round(vh)}`);
+  });
+
+  const stopDrag = () => {
+    if (dragging) {
+      dragging = false;
+      svg.style.cursor = 'grab';
+    }
+  };
+  svg.addEventListener('mouseup', stopDrag);
+  svg.addEventListener('mouseleave', stopDrag);
+  svg.addEventListener('dblclick', () => {
+    [vx, vy, vw, vh] = initial;
+    svg.setAttribute('viewBox', initial.join(' '));
+  });
+}
+
 function showSource(fact) {
   const root = $('#source-content');
   root.replaceChildren(text('h2', fact.attribute));
@@ -191,9 +378,18 @@ function showSource(fact) {
   }
   root.append(lineageBox);
 
+  const actions = text('div', null, 'export-actions source-pivot-bar');
+  const isPinned = (snapshot?.operations?.pins || []).some(p => p.fact_id === fact.fact_id);
+  const pinBtn = text('button', isPinned ? 'Unpin Finding' : 'Pin Finding to Case', 'secondary');
+  pinBtn.type = 'button';
+  pinBtn.onclick = () => pinFactToOperations(fact);
+  actions.append(pinBtn);
+
   if (isPivotableValue(fact.value, fact.attribute)) {
     const pivotVal = fact.value.trim();
-    const actions = text('div', null, 'export-actions source-pivot-bar');
+    const expandBtn = text('button', `Expand in Place`, 'secondary');
+    expandBtn.type = 'button';
+    expandBtn.onclick = () => expandEntityNodeInPlace(pivotVal);
     const pivotBtn = text('button', `Pivot: Investigate ${pivotVal}`, 'primary');
     pivotBtn.type = 'button';
     pivotBtn.onclick = () => {
@@ -205,10 +401,11 @@ function showSource(fact) {
       message(`Loaded selector "${pivotVal}" from source record ${fact.fact_id}. Click Investigate to launch.`);
       $('#domain').focus?.();
     };
-    actions.append(pivotBtn);
-    root.append(actions);
+    actions.append(expandBtn, pivotBtn);
   }
+  root.append(actions);
 
+  syncContextDrawer(`SOURCE RECORD · ${fact.admiralty || 'C3'}`);
   $('#source-dialog').showModal();
 }
 
@@ -371,6 +568,7 @@ function renderView() {
 
   if (tab === 'map') { renderGeoMap(view); return; }
   if (tab === 'graph') { renderGraph(view); return; }
+  if (tab === 'operations') { renderOperationsTab(view); return; }
   if (tab === 'analysis') { renderAnalysis(view); return; }
 
   if (tab === 'infrastructure' && isEmailBrief()) {
@@ -382,8 +580,8 @@ function renderView() {
   }
   if (tab === 'infrastructure') {
     view.append(
-      text('p', 'DNS, TLS certificates, HTTP headers, Shodan InternetDB ports/CVEs, RDAP registration, passive subdomains, and web technology fingerprints.', 'notice'),
-      table(brief.facts.filter(f => /^(dns|dnssec|tls|http|ip|host|whois|tech|web|discovery|intelx|email\.(dmarc|spf|dkim|mtasts|tlsrpt))\./.test(f.attribute)), true)
+      text('p', 'DNS, TLS certificates, HTTP headers, Shodan InternetDB ports/CVEs, RIPEstat BGP/ASN routing, RFC 9116 security.txt, RDAP registration, passive subdomains, and web technology fingerprints.', 'notice'),
+      table(brief.facts.filter(f => /^(dns|dnssec|tls|http|ip|bgp|security_txt|host|whois|tech|web|discovery|intelx|email\.(dmarc|spf|dkim|mtasts|tlsrpt))\./.test(f.attribute)), true)
     );
     return;
   }
@@ -1579,6 +1777,43 @@ function renderScores(view) {
   view.append(grid);
 }
 
+function findShortestEntityPath(nodes, edges, fromId, toId) {
+  if (!fromId || !toId || fromId === toId) return null;
+  const adj = new Map();
+  nodes.forEach(n => adj.set(n.id, []));
+  edges.forEach((e, idx) => {
+    if (!adj.has(e.source)) adj.set(e.source, []);
+    if (!adj.has(e.target)) adj.set(e.target, []);
+    adj.get(e.source).push({neighbor: e.target, edgeIdx: idx});
+    adj.get(e.target).push({neighbor: e.source, edgeIdx: idx});
+  });
+  const queue = [[fromId]];
+  const visited = new Set([fromId]);
+  const edgeTrail = new Map();
+  while (queue.length) {
+    const path = queue.shift();
+    const curr = path[path.length - 1];
+    if (curr === toId) {
+      const edgeIndices = new Set();
+      for (let i = 1; i < path.length; i++) {
+        const key = `${path[i - 1]}->${path[i]}`;
+        if (edgeTrail.has(key)) edgeIndices.add(edgeTrail.get(key));
+      }
+      return {nodeIds: new Set(path), orderedIds: path, edgeIndices};
+    }
+    for (const {neighbor, edgeIdx} of (adj.get(curr) || [])) {
+      if (!visited.has(neighbor)) {
+        visited.add(neighbor);
+        edgeTrail.set(`${curr}->${neighbor}`, edgeIdx);
+        queue.push([...path, neighbor]);
+      }
+    }
+  }
+  return null;
+}
+
+let graphPathFrom = '', graphPathTo = '', activePathResult = null;
+
 function renderGraph(view) {
   const graph = brief.graph;
   if (!graph) {
@@ -1608,6 +1843,50 @@ function renderGraph(view) {
   toolbar.append(pills, zoomBox);
   view.append(toolbar);
 
+  // Shortest-Path Link Finder Bar
+  if (all.length >= 2) {
+    const pathBar = text('div', null, 'path-finder-bar');
+    pathBar.append(text('span', 'SHORTEST-PATH LINK FINDER', 'eyebrow'));
+    const selFrom = document.createElement('select');
+    selFrom.setAttribute('aria-label', 'Shortest path source entity');
+    const selTo = document.createElement('select');
+    selTo.setAttribute('aria-label', 'Shortest path target entity');
+    all.slice(0, 80).forEach((n, idx) => {
+      const o1 = text('option', `${n.kind.toUpperCase()}: ${n.label.slice(0, 34)}`);
+      o1.value = n.id;
+      const o2 = text('option', `${n.kind.toUpperCase()}: ${n.label.slice(0, 34)}`);
+      o2.value = n.id;
+      selFrom.append(o1);
+      selTo.append(o2);
+      if (!graphPathFrom && idx === 0) graphPathFrom = n.id;
+      if (!graphPathTo && idx === Math.min(all.length - 1, 2)) graphPathTo = n.id;
+    });
+    selFrom.value = graphPathFrom;
+    selTo.value = graphPathTo;
+    const findBtn = text('button', 'Trace Link Path', 'secondary');
+    findBtn.type = 'button';
+    findBtn.onclick = () => {
+      graphPathFrom = selFrom.value;
+      graphPathTo = selTo.value;
+      activePathResult = findShortestEntityPath(all, graph.edges || [], graphPathFrom, graphPathTo);
+      if (!activePathResult) message('No connected path found between the selected entities.', true);
+      else message(`Traced ${activePathResult.orderedIds.length - 1}-hop link path across source-backed evidence.`);
+      renderView();
+    };
+    const clearBtn = text('button', 'Reset Path', 'secondary');
+    clearBtn.type = 'button';
+    clearBtn.onclick = () => {
+      activePathResult = null;
+      renderView();
+    };
+    pathBar.append(selFrom, text('span', 'TO', 'mono muted'), selTo, findBtn, clearBtn);
+    if (activePathResult) {
+      const chainLabels = activePathResult.orderedIds.map(id => all.find(n => n.id === id)?.label || id).join(' -> ');
+      pathBar.append(text('span', `Path: ${chainLabels}`, 'mono'));
+    }
+    view.append(pathBar);
+  }
+
   const NODE_W = 300, COL = NODE_W + 60, ROW = 75, MAXLEN = 40;
   const filteredNodes = all.filter(n => graphKindFilter === 'all' ? (n.kind !== 'observation' || all.length <= 25) : (n.kind === graphKindFilter || n.id === all[0]?.id)).slice(0, 80);
   const positions = new Map();
@@ -1630,13 +1909,14 @@ function renderGraph(view) {
   svg.setAttribute('aria-label', 'Source-backed entity relationships');
   svg.style.minWidth = Math.round(width * graphZoom) + 'px';
 
-  (graph.edges || []).forEach(edge => {
+  (graph.edges || []).forEach((edge, idx) => {
     const a = positions.get(edge.source), b = positions.get(edge.target);
     if (!a || !b) return;
     const path = document.createElementNS(ns, 'path');
     const x1 = a.x + NODE_W, y1 = a.y + 18, x2 = b.x, y2 = b.y + 18;
     path.setAttribute('d', `M${x1},${y1} C${x1 + 45},${y1} ${x2 - 45},${y2} ${x2},${y2}`);
-    path.setAttribute('class', 'graph-edge');
+    const isHighlighted = activePathResult?.edgeIndices?.has(idx);
+    path.setAttribute('class', 'graph-edge' + (isHighlighted ? ' path-highlight' : ''));
     const title = document.createElementNS(ns, 'title');
     title.textContent = edge.kind + ' · ' + edge.evidence_ids.length + ' source-backed observations';
     path.append(title);
@@ -1661,7 +1941,8 @@ function renderGraph(view) {
     rect.setAttribute('height', 38);
     rect.setAttribute('rx', 10);
     rect.setAttribute('ry', 10);
-    rect.setAttribute('class', 'graph-node');
+    const isNodeHighlighted = activePathResult?.nodeIds?.has(node.id);
+    rect.setAttribute('class', 'graph-node' + (isNodeHighlighted ? ' path-highlight' : ''));
     const label = document.createElementNS(ns, 'text');
     label.setAttribute('x', 12);
     label.setAttribute('y', 24);
@@ -1672,6 +1953,7 @@ function renderGraph(view) {
     g.append(rect, label, title);
     svg.append(g);
   });
+  attachInteractiveSvgPanZoom(svg);
   const canvas = text('div', null, 'panel graph-canvas');
   canvas.append(svg);
   view.append(canvas);
@@ -1736,6 +2018,7 @@ function showSourceAdapterInspector(sourceName, sourceFacts) {
     actions.append(pivotBtn);
     root.append(actions);
   }
+  syncContextDrawer(`SOURCE ADAPTER · ${sourceName.toUpperCase()}`);
   $('#source-dialog').showModal();
 }
 
@@ -1902,10 +2185,12 @@ function renderSourceConnectionChart(view) {
   hubT2.setAttribute('y', '33');
   hubT2.setAttribute('text-anchor', 'middle');
   hubT2.setAttribute('class', 'radial-label');
+  hubT2.setAttribute('class', 'radial-label');
   hubT2.textContent = String(subjectLabel()).slice(0, 18);
   hubG.append(hubRect, hubT1, hubT2);
   svg.append(hubG);
 
+  attachInteractiveSvgPanZoom(svg);
   const canvasWrap = text('div', null, 'source-chart-canvas');
   canvasWrap.append(svg);
   chartPanel.body.append(canvasWrap);
@@ -1987,8 +2272,13 @@ function showEntityTransformInspector(node) {
     root.append(fBox);
   }
 
+  const actions = text('div', null, 'export-actions source-pivot-bar');
+  const expandBtn = text('button', 'Expand Node in Place', 'secondary');
+  expandBtn.type = 'button';
+  expandBtn.onclick = () => expandEntityNodeInPlace(node.label);
+  actions.append(expandBtn);
+
   if (isPivotableValue(node.label, node.kind)) {
-    const actions = text('div', null, 'export-actions source-pivot-bar');
     const pivotBtn = text('button', `Run Transform: Investigate ${node.label}`, 'primary');
     pivotBtn.type = 'button';
     pivotBtn.onclick = () => {
@@ -2000,8 +2290,9 @@ function showEntityTransformInspector(node) {
       $('#investigate').requestSubmit?.();
     };
     actions.append(pivotBtn);
-    root.append(actions);
   }
+  root.append(actions);
+  syncContextDrawer(`${node.kind.toUpperCase()} · ${node.label}`);
   $('#source-dialog').showModal();
 }
 
@@ -2035,6 +2326,9 @@ function showGeoNodeInspector(pt) {
   }
 
   const actions = text('div', null, 'export-actions source-pivot-bar');
+  const expandBtn = text('button', 'Expand Host in Place', 'secondary');
+  expandBtn.type = 'button';
+  expandBtn.onclick = () => expandEntityNodeInPlace(pt.ip);
   const pivotBtn = text('button', `Run Shodan / Host Transform on ${pt.ip}`, 'primary');
   pivotBtn.type = 'button';
   pivotBtn.onclick = () => {
@@ -2045,8 +2339,9 @@ function showGeoNodeInspector(pt) {
     updateSeedInputNotice();
     $('#investigate').requestSubmit?.();
   };
-  actions.append(pivotBtn);
+  actions.append(expandBtn, pivotBtn);
   root.append(actions);
+  syncContextDrawer(`HOST NODE · ${pt.ip}`);
   $('#source-dialog').showModal();
 }
 
@@ -2160,6 +2455,7 @@ function renderGeoMap(view) {
     svg.append(g);
   });
 
+  attachInteractiveSvgPanZoom(svg);
   const mapWrap = text('div', null, 'geo-map-canvas');
   mapWrap.append(svg);
   view.append(mapWrap);
@@ -2220,7 +2516,13 @@ async function downloadMaltego(fmt) {
     a.download = data.filename || `find3r-${brief.run_id}-${fmt}`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-    message(`Exported Maltego ${fmt === 'maltego.graphml' ? 'GraphML (.graphml)' : 'Entity Table (.csv)'} for ${subjectLabel()}.`);
+    const labelMap = {
+      'maltego.graphml': 'Maltego GraphML (.graphml)',
+      'maltego.csv': 'Maltego Entity Table (.csv)',
+      'stix.json': 'OASIS STIX 2.1 Threat Intelligence Bundle (.json)',
+      'dossier.html': 'Print-Ready Executive HTML Dossier (.html)',
+    };
+    message(`Exported ${labelMap[fmt] || fmt} for ${subjectLabel()}.`);
   } catch (err) {
     message(err.message, true);
   }
@@ -2228,6 +2530,509 @@ async function downloadMaltego(fmt) {
 
 if ($('#export-maltego-graphml')) $('#export-maltego-graphml').onclick = () => downloadMaltego('maltego.graphml');
 if ($('#export-maltego-csv')) $('#export-maltego-csv').onclick = () => downloadMaltego('maltego.csv');
+if ($('#export-stix')) $('#export-stix').onclick = () => downloadMaltego('stix.json');
+if ($('#export-dossier-html')) $('#export-dossier-html').onclick = () => downloadMaltego('dossier.html');
+
+// =========================================================================
+// OPERATIONS & TRADECRAFT WORKSPACE (Diff Engine, Case Fusion, Pinboard, ACH)
+// =========================================================================
+let lastDiffData = null;
+let loadedCaseDossier = null;
+
+function renderOperationsTab(view) {
+  const ops = snapshot?.operations || {cases: [], pins: [], notes: [], hypotheses: [], ach_ranked: []};
+  const allRuns = snapshot?.runs || [];
+
+  // 1. Temporal Attack Surface Diff ("Run Delta Engine")
+  const diffPanel = panel('Temporal Attack Surface Diff · Run Delta Engine');
+  diffPanel.body.append(
+    text('p', 'Compare any two stored investigations to detect new subdomains, IP/ASN shifts, opened/closed Shodan ports, new CVE advisories, and posture grade drift.', 'notice')
+  );
+  const diffBar = text('div', null, 'ops-diff-bar');
+  const selBase = document.createElement('select');
+  selBase.setAttribute('aria-label', 'Baseline investigation run');
+  const selCurr = document.createElement('select');
+  selCurr.setAttribute('aria-label', 'Comparison investigation run');
+  allRuns.forEach((r, idx) => {
+    const label = `${subjectLabel(r)} · ${r.id.slice(0, 8)} (${date(r.started_at)})`;
+    const o1 = text('option', `BASELINE: ${label}`);
+    o1.value = r.id;
+    const o2 = text('option', `CURRENT: ${label}`);
+    o2.value = r.id;
+    selBase.append(o1);
+    selCurr.append(o2);
+    if (idx === Math.min(1, allRuns.length - 1)) selBase.value = r.id;
+  });
+  if (brief?.run_id && allRuns.some(r => r.id === brief.run_id)) {
+    selCurr.value = brief.run_id;
+  }
+  const runDiffBtn = text('button', 'Compute Attack Surface Delta', 'primary');
+  runDiffBtn.type = 'button';
+  const diffResultWrap = text('div');
+
+  const renderDiffResult = (diff) => {
+    diffResultWrap.replaceChildren();
+    if (!diff) return;
+    const s = diff.summary || {};
+    const scoreDeltaStr = s.score_delta === null || s.score_delta === undefined
+      ? 'N/A'
+      : (s.score_delta >= 0 ? `+${s.score_delta}` : String(s.score_delta));
+    const cards = text('div', null, 'posture-grid');
+    [
+      ['POSTURE GRADE DRIFT', `${s.baseline_grade || 'N/A'} -> ${s.current_grade || 'N/A'}`, `Score Delta: ${scoreDeltaStr}`],
+      ['ADDED OBSERVATIONS', `+${s.added_count || 0}`, 'Newly appeared selectors & facts'],
+      ['REMOVED OBSERVATIONS', `-${s.removed_count || 0}`, 'Decommissioned or absent records'],
+      ['PORT / CVE DRIFT', String((diff.host_port_drift || []).length), 'Hosts with port or advisory changes'],
+    ].forEach(([lbl, val, sub]) => {
+      const c = text('div', null, 'posture-card');
+      const top = text('div', null, 'posture-card-top');
+      top.append(text('h3', lbl), text('span', val, 'grade-badge'));
+      c.append(top, text('p', sub));
+      cards.append(c);
+    });
+    diffResultWrap.append(cards);
+
+    if ((diff.host_port_drift || []).length) {
+      diff.host_port_drift.forEach(drift => {
+        const row = text('div', null, 'requirement');
+        row.append(
+          text('h3', `Host ${drift.ip} Port/CVE Drift`),
+          text('p', `Added Ports: ${(drift.added_ports || []).join(', ') || 'none'} · Removed Ports: ${(drift.removed_ports || []).join(', ') || 'none'} · Added CVEs: ${(drift.added_vulns || []).join(', ') || 'none'}`, 'mono')
+        );
+        diffResultWrap.append(row);
+      });
+    }
+
+    const deltaCols = text('div', null, 'ops-grid');
+    const addedBox = text('div', null, 'requirement');
+    addedBox.append(text('span', `+ ${s.added_count || 0} ADDED`, 'delta-badge-add'), text('h3', 'Newly Observed Attack Surface'));
+    (diff.added_facts || []).slice(0, 15).forEach(f => {
+      addedBox.append(text('p', `[+] ${f.subject} · ${f.attribute} = ${f.value}`, 'mono'));
+    });
+    if (!(diff.added_facts || []).length) addedBox.append(text('p', 'No added facts between selected runs.', 'notice'));
+
+    const removedBox = text('div', null, 'requirement');
+    removedBox.append(text('span', `- ${s.removed_count || 0} REMOVED`, 'delta-badge-rem'), text('h3', 'Removed / Absent Observations'));
+    (diff.removed_facts || []).slice(0, 15).forEach(f => {
+      removedBox.append(text('p', `[-] ${f.subject} · ${f.attribute} = ${f.value}`, 'mono muted'));
+    });
+    if (!(diff.removed_facts || []).length) removedBox.append(text('p', 'No removed facts between selected runs.', 'notice'));
+
+    deltaCols.append(addedBox, removedBox);
+    diffResultWrap.append(deltaCols);
+  };
+
+  runDiffBtn.onclick = async () => {
+    if (!selBase.value || !selCurr.value) return;
+    runDiffBtn.disabled = true;
+    runDiffBtn.textContent = 'Computing Delta…';
+    try {
+      lastDiffData = await api(`/api/runs/${encodeURIComponent(selBase.value)}/diff/${encodeURIComponent(selCurr.value)}`);
+      renderDiffResult(lastDiffData);
+      message(`Computed temporal delta between ${selBase.value.slice(0, 8)} and ${selCurr.value.slice(0, 8)}.`);
+    } catch (err) {
+      message(err.message, true);
+    } finally {
+      runDiffBtn.disabled = false;
+      runDiffBtn.textContent = 'Compute Attack Surface Delta';
+    }
+  };
+  diffBar.append(selBase, selCurr, runDiffBtn);
+  diffPanel.body.append(diffBar, diffResultWrap);
+  if (lastDiffData) renderDiffResult(lastDiffData);
+  view.append(diffPanel.root);
+
+  // 2. Multi-Run Operation Cases & Cross-Target Shared Infrastructure Correlation
+  const casePanel = panel('Operation Cases · Multi-Run Dossier Fusion & Cross-Target Correlation');
+  casePanel.body.append(
+    text('p', 'Group multiple domain, email, username, and IP investigations into a unified Operation Case to automatically detect shared IPs, shared ASNs, shared nameservers, and shared TLS certificate issuers across targets.', 'notice')
+  );
+  const caseForm = text('div', null, 'ops-diff-bar');
+  const titleInp = document.createElement('input');
+  titleInp.type = 'text';
+  titleInp.placeholder = 'Operation Case Title (e.g., OP-AURORA Vendor Assessment)';
+  const clientInp = document.createElement('input');
+  clientInp.type = 'text';
+  clientInp.placeholder = 'Mission / Client Tag';
+  const createCaseBtn = text('button', 'Create / Fuse Operation Case', 'primary');
+  createCaseBtn.type = 'button';
+
+  const runCheckboxes = text('div', null, 'source-connected-pills');
+  allRuns.slice(0, 16).forEach((r, idx) => {
+    const lbl = text('label', null, 'contact-option');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.value = r.id;
+    cb.checked = idx < 3 || r.id === brief?.run_id;
+    lbl.append(cb, text('span', `${subjectLabel(r)} (${r.id.slice(0, 6)})`));
+    runCheckboxes.append(lbl);
+  });
+
+  createCaseBtn.onclick = async () => {
+    const checkedIds = [...runCheckboxes.querySelectorAll('input:checked')].map(i => i.value);
+    const title = titleInp.value.trim() || `Operation ${subjectLabel()}`;
+    try {
+      const res = await api('/api/operations/cases', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json', 'X-Workspace-Token': session},
+        body: JSON.stringify({
+          title,
+          client: clientInp.value.trim(),
+          classification: 'TLP:AMBER+STRICT',
+          run_ids: checkedIds,
+        }),
+      });
+      if (snapshot) snapshot.operations = res.operations;
+      if (res.case?.id) {
+        loadedCaseDossier = await api(`/api/operations/cases/${encodeURIComponent(res.case.id)}`);
+      }
+      message(`Saved Operation Case "${title}" with ${checkedIds.length} fused run(s).`);
+      renderView();
+    } catch (err) {
+      message(err.message, true);
+    }
+  };
+  caseForm.append(titleInp, clientInp, createCaseBtn);
+  casePanel.body.append(caseForm, runCheckboxes);
+
+  const casesList = text('div', null, 'ops-grid');
+  (ops.cases || []).forEach(c => {
+    const card = text('div', null, 'posture-card');
+    const top = text('div', null, 'posture-card-top');
+    top.append(text('h3', c.title), text('span', `${(c.run_ids || []).length} RUNS`, 'tag'));
+    card.append(top, text('p', `${c.classification || 'TLP:AMBER'} · ${c.client || 'Internal Intel'} · Updated ${date(c.updated_at)}`, 'mono muted'));
+    const actions = text('div', null, 'export-actions');
+    const fuseBtn = text('button', 'Fuse & Correlate Case', 'secondary');
+    fuseBtn.type = 'button';
+    fuseBtn.onclick = async () => {
+      try {
+        loadedCaseDossier = await api(`/api/operations/cases/${encodeURIComponent(c.id)}`);
+        message(`Correlated ${loadedCaseDossier.runs_count} runs in "${c.title}": ${(loadedCaseDossier.shared_correlations || []).length} cross-target overlap(s) found.`);
+        renderView();
+      } catch (err) {
+        message(err.message, true);
+      }
+    };
+    const loadFusedBtn = text('button', 'Open Fused Graph & Map', 'primary');
+    loadFusedBtn.type = 'button';
+    loadFusedBtn.onclick = async () => {
+      try {
+        const fused = await api(`/api/operations/cases/${encodeURIComponent(c.id)}`);
+        loadedCaseDossier = fused;
+        brief = fused;
+        $('#company-title').textContent = fused.company || c.title;
+        $('#subject-kind').textContent = `FUSED OPERATION CASE · ${fused.runs_count} TARGETS`;
+        setTab('graph');
+        message(`Loaded fused multi-target dossier "${c.title}" (${fused.facts.length} combined observations).`);
+      } catch (err) {
+        message(err.message, true);
+      }
+    };
+    actions.append(fuseBtn, loadFusedBtn);
+    card.append(actions);
+    casesList.append(card);
+  });
+  if ((ops.cases || []).length) casePanel.body.append(casesList);
+
+  if (loadedCaseDossier) {
+    const corrBox = text('div', null, 'requirement');
+    corrBox.append(
+      text('span', `${(loadedCaseDossier.shared_correlations || []).length} SHARED INFRASTRUCTURE CORRELATIONS`, 'status'),
+      text('h3', `Cross-Target Overlap · ${loadedCaseDossier.case?.title || 'Operation Case'}`)
+    );
+    (loadedCaseDossier.shared_correlations || []).slice(0, 12).forEach(ov => {
+      corrBox.append(text('p', `[${ov.attribute}] ${ov.value} — Shared across ${ov.target_count} targets: ${(ov.targets || []).join(', ')}`, 'mono'));
+    });
+    if (!(loadedCaseDossier.shared_correlations || []).length) {
+      corrBox.append(text('p', 'No overlapping IPs, ASNs, nameservers, or TLS issuers detected across the runs in this case.', 'notice'));
+    }
+    casePanel.body.append(corrBox);
+  }
+  view.append(casePanel.root);
+
+  // 3. Analyst Pinboard & Timestamped Tradecraft Notes
+  const splitOps = text('div', null, 'ops-grid');
+  const pinPanel = panel(`Analyst Pinboard (${(ops.pins || []).length})`);
+  pinPanel.body.append(text('p', 'Key findings pinned from the Evidence table or Context Inspector Drawer.', 'notice'));
+  if (!(ops.pins || []).length) {
+    pinPanel.body.append(text('p', 'No findings pinned yet. Click any Admiralty badge (A1–C3) and select "Pin Finding to Case".', 'notice'));
+  } else {
+    (ops.pins || []).forEach(p => {
+      const row = text('div', null, 'requirement');
+      row.append(
+        text('span', p.admiralty || 'B2', 'tag'),
+        text('h3', `${p.subject} · ${p.attribute}`),
+        text('p', String(p.value), 'mono')
+      );
+      const unpinBtn = text('button', 'Unpin', 'secondary');
+      unpinBtn.type = 'button';
+      unpinBtn.onclick = () => pinFactToOperations(p);
+      row.append(unpinBtn);
+      pinPanel.body.append(row);
+    });
+  }
+
+  const notesPanel = panel(`Timestamped Tradecraft Notes (${(ops.notes || []).length})`);
+  const noteForm = text('div', null, 'ops-diff-bar');
+  const noteInput = document.createElement('input');
+  noteInput.type = 'text';
+  noteInput.placeholder = 'Record timestamped analyst observation or attribution assessment…';
+  const addNoteBtn = text('button', 'Log Note', 'secondary');
+  addNoteBtn.type = 'button';
+  addNoteBtn.onclick = async () => {
+    const body = noteInput.value.trim();
+    if (!body) return;
+    try {
+      const res = await api('/api/operations/note', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json', 'X-Workspace-Token': session},
+        body: JSON.stringify({
+          run_id: brief?.run_id || '',
+          subject: subjectLabel(),
+          author: operatorCallsign,
+          classification: 'TLP:AMBER+STRICT',
+          body,
+        }),
+      });
+      if (snapshot) snapshot.operations = res.operations;
+      noteInput.value = '';
+      renderView();
+    } catch (err) {
+      message(err.message, true);
+    }
+  };
+  noteForm.append(noteInput, addNoteBtn);
+  notesPanel.body.append(noteForm);
+  (ops.notes || []).slice(0, 12).forEach(n => {
+    const item = text('div', null, 'requirement');
+    item.append(
+      text('span', `${n.author || 'analyst'} · ${date(n.created_at)} · ${n.classification || 'TLP:AMBER'}`, 'mono muted'),
+      text('p', n.body)
+    );
+    notesPanel.body.append(item);
+  });
+  splitOps.append(pinPanel.root, notesPanel.root);
+  view.append(splitOps);
+
+  // 4. Analysis of Competing Hypotheses (ACH) Admiralty-Weighted Matrix
+  const achPanel = panel('Analysis of Competing Hypotheses (ACH) · Admiralty-Weighted Matrix');
+  achPanel.body.append(
+    text('p', 'Evaluate competing intelligence hypotheses against collected facts weighted by Admiralty source reliability and information credibility (A1 = 1.00 through F6 = 0.20).', 'notice')
+  );
+  const achForm = text('div', null, 'ops-diff-bar');
+  const hTitle = document.createElement('input');
+  hTitle.type = 'text';
+  hTitle.placeholder = 'Hypothesis (e.g., H3: Target hosts unpatched edge services)';
+  const hSupp = document.createElement('input');
+  hSupp.type = 'text';
+  hSupp.placeholder = 'Supporting attrs/keywords (comma-separated, e.g. ip.open_port, ip.vuln)';
+  const hRef = document.createElement('input');
+  hRef.type = 'text';
+  hRef.placeholder = 'Refuting attrs/keywords (comma-separated, e.g. dnssec.status)';
+  const addHypBtn = text('button', 'Add Hypothesis', 'secondary');
+  addHypBtn.type = 'button';
+  addHypBtn.onclick = async () => {
+    if (!hTitle.value.trim()) return;
+    try {
+      const res = await api('/api/operations/hypothesis', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json', 'X-Workspace-Token': session},
+        body: JSON.stringify({
+          title: hTitle.value.trim(),
+          supporting_attributes: hSupp.value.split(',').map(s => s.trim()).filter(Boolean),
+          refuting_attributes: hRef.value.split(',').map(s => s.trim()).filter(Boolean),
+        }),
+      });
+      if (snapshot) snapshot.operations = res.operations;
+      renderView();
+    } catch (err) {
+      message(err.message, true);
+    }
+  };
+  achForm.append(hTitle, hSupp, hRef, addHypBtn);
+  achPanel.body.append(achForm);
+
+  const achWrap = text('div', null, 'panel table-wrap');
+  const achTable = document.createElement('table');
+  achTable.className = 'ach-matrix-table';
+  const thead = document.createElement('thead');
+  const htr = document.createElement('tr');
+  ['HYPOTHESIS', 'ASSESSMENT', 'CONFIDENCE', ' WEIGHTED SUPPORT', 'WEIGHTED REFUTE', 'CITED FACTS'].forEach(col => htr.append(text('th', col)));
+  thead.append(htr);
+  achTable.append(thead);
+  const tbody = document.createElement('tbody');
+  (ops.ach_ranked || ops.hypotheses || []).forEach(h => {
+    const tr = document.createElement('tr');
+    const titleTd = text('td');
+    titleTd.append(text('strong', h.title), text('div', h.description || '', 'muted'));
+    const statusTd = text('td');
+    statusTd.append(text('span', h.assessment || 'UNDECIDED', 'tag'));
+    tr.append(
+      titleTd,
+      statusTd,
+      text('td', `${h.confidence_pct ?? 50}%`, 'mono'),
+      text('td', `+${h.support_score ?? 0} (${h.supporting_count ?? 0})`, 'mono'),
+      text('td', `-${h.refute_score ?? 0} (${h.refuting_count ?? 0})`, 'mono'),
+      text('td', (h.supporting_fact_ids || []).slice(0, 4).join(', ') || '—', 'mono muted')
+    );
+    tbody.append(tr);
+  });
+  achTable.append(tbody);
+  achWrap.append(achTable);
+  achPanel.body.append(achWrap);
+  view.append(achPanel.root);
+}
+
+// =========================================================================
+// GLOBAL CMD+K / CTRL+K COMMAND & PIVOT PALETTE
+// =========================================================================
+let cmdkActiveIdx = 0, cmdkCurrentItems = [];
+
+function buildCmdKItems(query) {
+  const q = (query || '').trim().toLowerCase();
+  const items = [];
+
+  // Quick Workspace & Tab Actions
+  const actions = [
+    {label: 'Workspace: Command & Launch Omnibar', meta: 'ACTION · WORKSPACE', run: () => setWorkspaceView('command')},
+    {label: 'Workspace: Ephemeral Cloud Nodes (Vultr VPS)', meta: 'ACTION · CLOUD', run: () => setWorkspaceView('cloud')},
+    {label: 'Workspace: Agent Harness & Local Ollama AI', meta: 'ACTION · AI HARNESS', run: () => setWorkspaceView('harness')},
+    {label: 'Workspace: OSINT Sensors & Tool Installer', meta: 'ACTION · SENSORS', run: () => setWorkspaceView('tools')},
+    {label: 'Configure API Keys & Monthly Budget', meta: 'ACTION · SETTINGS', run: () => openSettings()},
+  ];
+  if (brief) {
+    actions.unshift(
+      {label: `Open Operations, Run Diff & ACH Matrix (${subjectLabel()})`, meta: 'TAB · OPERATIONS', run: () => setTab('operations')},
+      {label: `Open Geo-IP & ASN Infrastructure Map (${subjectLabel()})`, meta: 'TAB · GEO MAP', run: () => setTab('map')},
+      {label: `Open Entity Graph & Shortest-Path Finder (${subjectLabel()})`, meta: 'TAB · ENTITY GRAPH', run: () => setTab('graph')},
+      {label: `Open Overview & A–F Security Posture (${subjectLabel()})`, meta: 'TAB · OVERVIEW', run: () => setTab('overview')},
+      {label: `Open All Guarded Evidence (${brief.facts?.length || 0} facts)`, meta: 'TAB · EVIDENCE', run: () => setTab('evidence')},
+      {label: `Export OASIS STIX 2.1 Threat Intel Bundle (.json)`, meta: 'EXPORT · STIX 2.1', run: () => downloadMaltego('stix.json')},
+      {label: `Export Print-Ready Executive HTML Dossier (.html)`, meta: 'EXPORT · HTML DOSSIER', run: () => downloadMaltego('dossier.html')},
+      {label: `Export Maltego GraphML (.graphml)`, meta: 'EXPORT · MALTEGO', run: () => downloadMaltego('maltego.graphml')}
+    );
+  }
+  actions.forEach(a => {
+    if (!q || a.label.toLowerCase().includes(q) || a.meta.toLowerCase().includes(q)) {
+      items.push(a);
+    }
+  });
+
+  // Stored Runs
+  (snapshot?.runs || []).forEach(r => {
+    const lbl = subjectLabel(r);
+    if (!q || lbl.toLowerCase().includes(q) || (r.subject_kind || '').toLowerCase().includes(q)) {
+      items.push({
+        label: `Open Run: ${lbl}`,
+        meta: `RUN · ${(r.subject_kind || 'domain').toUpperCase()} · ${r.id.slice(0, 8)}`,
+        run: () => openRun(r.id),
+      });
+    }
+  });
+
+  // Current Brief Entities & Facts
+  if (brief && q.length >= 2) {
+    (brief.graph?.nodes || []).slice(0, 40).forEach(n => {
+      if ((n.label || '').toLowerCase().includes(q) || (n.kind || '').toLowerCase().includes(q)) {
+        items.push({
+          label: `Inspect Entity: ${n.label}`,
+          meta: `ENTITY · ${(n.kind || '').toUpperCase()}`,
+          run: () => {
+            setTab('graph');
+            showEntityTransformInspector(n);
+          },
+        });
+      }
+    });
+    (brief.facts || []).slice(0, 80).forEach(f => {
+      if ((f.attribute || '').toLowerCase().includes(q) || String(f.value || '').toLowerCase().includes(q) || (f.subject || '').toLowerCase().includes(q)) {
+        items.push({
+          label: `${f.attribute}: ${String(f.value).slice(0, 48)}`,
+          meta: `FACT · ${f.admiralty || 'C3'} · ${f.source}`,
+          run: () => showSource(f),
+        });
+      }
+    });
+  }
+
+  if (q && isPivotableValue(q, 'auto')) {
+    items.unshift({
+      label: `Launch Live Investigation on "${query.trim()}"`,
+      meta: 'PIVOT · NEW INVESTIGATION',
+      run: () => {
+        setWorkspaceView('command');
+        if ($('#seed-kind')) $('#seed-kind').value = 'auto';
+        $('#domain').value = query.trim();
+        updateSeedInputNotice();
+        $('#investigate').requestSubmit?.();
+      },
+    });
+  }
+
+  return items.slice(0, 18);
+}
+
+function renderCmdKResults() {
+  const list = $('#cmdk-results');
+  if (!list) return;
+  const query = $('#cmdk-input')?.value || '';
+  cmdkCurrentItems = buildCmdKItems(query);
+  if (cmdkActiveIdx >= cmdkCurrentItems.length) cmdkActiveIdx = 0;
+  list.replaceChildren();
+  cmdkCurrentItems.forEach((item, idx) => {
+    const btn = text('button', null, 'cmdk-item' + (idx === cmdkActiveIdx ? ' active' : ''));
+    btn.type = 'button';
+    btn.append(text('span', item.label, 'cmdk-item-label'), text('span', item.meta, 'cmdk-item-meta'));
+    btn.onclick = () => {
+      $('#cmdk-dialog')?.close();
+      item.run();
+    };
+    list.append(btn);
+  });
+}
+
+function openCmdK() {
+  const dlg = $('#cmdk-dialog');
+  if (!dlg) return;
+  cmdkActiveIdx = 0;
+  if ($('#cmdk-input')) $('#cmdk-input').value = '';
+  renderCmdKResults();
+  dlg.showModal();
+  $('#cmdk-input')?.focus?.();
+}
+
+if ($('#open-cmdk')) $('#open-cmdk').onclick = openCmdK;
+if ($('#close-cmdk')) $('#close-cmdk').onclick = () => $('#cmdk-dialog')?.close();
+if ($('#cmdk-input')) {
+  $('#cmdk-input').addEventListener('input', () => {
+    cmdkActiveIdx = 0;
+    renderCmdKResults();
+  });
+  $('#cmdk-input').addEventListener('keydown', e => {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      cmdkActiveIdx = (cmdkActiveIdx + 1) % Math.max(1, cmdkCurrentItems.length);
+      renderCmdKResults();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      cmdkActiveIdx = (cmdkActiveIdx - 1 + Math.max(1, cmdkCurrentItems.length)) % Math.max(1, cmdkCurrentItems.length);
+      renderCmdKResults();
+    } else if (e.key === 'Enter' && cmdkCurrentItems[cmdkActiveIdx]) {
+      e.preventDefault();
+      const chosen = cmdkCurrentItems[cmdkActiveIdx];
+      $('#cmdk-dialog')?.close();
+      chosen.run();
+    }
+  });
+}
+if (typeof window !== 'undefined' && window.addEventListener) {
+  window.addEventListener('keydown', e => {
+    if ((e.metaKey || e.ctrlKey) && e.key?.toLowerCase() === 'k') {
+      e.preventDefault();
+      openCmdK();
+    }
+  });
+}
 
 function renderAnalysis(view) {
   const box = panel('Agent Harness');

@@ -536,4 +536,145 @@ def test_hardening_geo_hints_xml_escape_and_ollama_import(engine, monkeypatch):
         analyze_brief(engine, {'facts': []}, 'multi', ['ollama', 'ollama:llama3.1:8b'])
 
 
+def test_ripestat_and_security_txt_adapters():
+    from neesha.adapters.base import RawResult, Request
+    from neesha.adapters.ripestat import RipestatAdapter
+    from neesha.adapters.wellknown import SecurityTxtAdapter
+
+    # 1. RipestatAdapter parses BGP prefix, ASN, and ASN holder
+    ripe = RipestatAdapter()
+    ripe_raw = RawResult(
+        json.dumps({
+            'results': {
+                '104.16.132.229': {
+                    'ip': '104.16.132.229',
+                    'prefix': '104.16.0.0/16',
+                    'asns': ['13335'],
+                    'holder': 'CLOUDFLARENET - Cloudflare, Inc.',
+                },
+            },
+        }).encode(),
+        'https://stat.ripe.net/data/network-info/data.json?resource=104.16.132.229',
+        http_status=200,
+    )
+    ripe_drafts = ripe.parse(ripe_raw, Request('ip', '104.16.132.229'))
+    ripe_pairs = {(d.attribute, d.value) for d in ripe_drafts}
+    assert ('bgp.prefix', '104.16.0.0/16') in ripe_pairs
+    assert ('host.asn', 'AS13335') in ripe_pairs
+    assert ('bgp.holder', 'CLOUDFLARENET - Cloudflare, Inc.') in ripe_pairs
+
+    # 2. SecurityTxtAdapter parses RFC 9116 security.txt and robots.txt disallow paths
+    sec = SecurityTxtAdapter()
+    sec_raw = RawResult(
+        json.dumps({
+            'domain': 'example.com',
+            'security_txt': 'Contact: mailto:security@example.com\nPolicy: https://example.com/security-policy\nEncryption: https://example.com/pgp.txt\n',
+            'robots_txt': 'User-agent: *\nDisallow: /admin-portal\nSitemap: https://example.com/sitemap.xml\n',
+        }).encode(),
+        'https://example.com/.well-known/security.txt',
+        http_status=200,
+    )
+    sec_drafts = sec.parse(sec_raw, Request('domain', 'example.com'))
+    sec_pairs = {(d.attribute, d.value) for d in sec_drafts}
+    assert ('security_txt.contact', 'mailto:security@example.com') in sec_pairs
+    assert ('security_txt.policy', 'https://example.com/security-policy') in sec_pairs
+    assert ('web.robots_disallow', '/admin-portal') in sec_pairs
+    assert ('web.sitemap_url', 'https://example.com/sitemap.xml') in sec_pairs
+
+
+def test_stix_html_dossier_diff_and_operations_engine(workspace, client, monkeypatch):
+    from neesha.harness.gate import EngagementView
+    request, base_url = client
+    _, _, body = request('/api/session')
+    token = json.loads(body)['token']
+    headers = {'X-Workspace-Token': token, 'Origin': base_url, 'Content-Type': 'application/json'}
+
+    now = datetime.now(timezone.utc)
+    # Run 1
+    monkeypatch.setattr('neesha.adapters.crtsh.http_get', lambda *a, **kw: json.dumps([
+        {'name_value': 'api.example.com', 'issuer_name': 'Example CA'}]))
+    workspace._run('example.com', EngagementView('authorized', 'prospect_company',
+        authorized_domains=('example.com',), starts_at=now - timedelta(days=1),
+        expires_at=now + timedelta(days=1)), False)
+    run_1 = workspace.job['run_id']
+
+    # Run 2 with an additional subdomain for temporal diffing (clear cache to simulate later scan)
+    with workspace.engine.begin() as conn:
+        conn.execute(schema.cache.delete())
+    monkeypatch.setattr('neesha.adapters.crtsh.http_get', lambda *a, **kw: json.dumps([
+        {'name_value': 'api.example.com\nvpn.example.com', 'issuer_name': 'Example CA'}]))
+    workspace._run('example.com', EngagementView('authorized', 'prospect_company',
+        authorized_domains=('example.com',), starts_at=now - timedelta(days=1),
+        expires_at=now + timedelta(days=1)), False)
+    run_2 = workspace.job['run_id']
+
+    # 1. STIX 2.1 Bundle export
+    st_stix, _, body_stix = request(f'/api/runs/{run_2}/stix.json')
+    assert st_stix == 200
+    stix_payload = json.loads(json.loads(body_stix)['content'])
+    assert stix_payload['type'] == 'bundle'
+    assert any(o['type'] == 'report' for o in stix_payload['objects'])
+
+    # 2. Print-Ready Executive HTML Dossier export
+    st_html, _, body_html = request(f'/api/runs/{run_2}/dossier.html')
+    assert st_html == 200
+    html_doc = json.loads(body_html)['content']
+    assert '<!doctype html>' in html_doc.lower()
+    assert 'example.com' in html_doc
+
+    # 3. Temporal Attack Surface Diff ("Run Delta Engine")
+    st_diff, _, body_diff = request(f'/api/runs/{run_1}/diff/{run_2}')
+    assert st_diff == 200
+    diff_data = json.loads(body_diff)
+    assert diff_data['summary']['added_count'] >= 1
+    assert any(f['value'] == 'vpn.example.com' for f in diff_data['added_facts'])
+
+    # 4. Operation Case creation & Multi-Run Dossier Fusion
+    st_case, _, body_case = request('/api/operations/cases', 'POST', {
+        'title': 'OP-AURORA Assessment',
+        'client': 'Red Team',
+        'classification': 'TLP:AMBER+STRICT',
+        'run_ids': [run_1, run_2],
+    }, headers=headers)
+    assert st_case in (200, 202)
+    case_id = json.loads(body_case)['case']['id']
+
+    st_fused, _, body_fused = request(f'/api/operations/cases/{case_id}')
+    assert st_fused == 200
+    fused = json.loads(body_fused)
+    assert fused['runs_count'] == 2
+    assert len(fused['facts']) >= 1
+
+    # 5. Analyst Pinboard, Timestamped Notes, and ACH Hypotheses
+    st_pin, _, body_pin = request('/api/operations/pin', 'POST', {
+        'fact_id': 'fact-test-1',
+        'run_id': run_2,
+        'subject': 'example.com',
+        'attribute': 'dns.subdomain',
+        'value': 'vpn.example.com',
+        'admiralty': 'B2',
+    }, headers=headers)
+    assert st_pin in (200, 202)
+    assert json.loads(body_pin)['pinned'] is True
+
+    st_note, _, body_note = request('/api/operations/note', 'POST', {
+        'run_id': run_2,
+        'subject': 'example.com',
+        'author': 'alpha-1',
+        'body': 'Observed new VPN gateway subdomain during periodic reassessment.',
+    }, headers=headers)
+    assert st_note in (200, 202)
+    assert json.loads(body_note)['note']['author'] == 'alpha-1'
+
+    st_hyp, _, body_hyp = request('/api/operations/hypothesis', 'POST', {
+        'title': 'H4: Target expanded remote access footprint',
+        'supporting_attributes': ['dns.subdomain', 'vpn.example.com'],
+        'refuting_attributes': [],
+    }, headers=headers)
+    assert st_hyp in (200, 202)
+    ops_snap = json.loads(body_hyp)['operations']
+    assert any(h['title'].startswith('H4:') for h in ops_snap['hypotheses'])
+
+
+
 

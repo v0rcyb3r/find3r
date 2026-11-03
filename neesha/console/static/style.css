@@ -1118,7 +1118,155 @@ footer{
 }
 .source-lineage-box svg{display:block;width:100%;height:auto}
 
+/* Persistent Right-Hand Split Context Inspector Drawer */
+.detail-split-layout{
+  display:grid;
+  grid-template-columns:minmax(0,1fr);
+  gap:18px;
+  align-items:start;
+}
+.detail-split-layout.drawer-open{
+  grid-template-columns:minmax(0,1fr) 390px;
+}
+.context-drawer{
+  position:sticky;
+  top:18px;
+  max-height:calc(100vh - 36px);
+  overflow-y:auto;
+  border:1px solid var(--line-2);
+  border-radius:var(--r-xl);
+  background:rgba(20,20,27,.96);
+  backdrop-filter:blur(14px);
+  padding:18px 20px;
+  box-shadow:0 20px 48px rgba(0,0,0,.45);
+}
+.context-drawer-head{
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  gap:10px;
+  padding-bottom:12px;
+  margin-bottom:14px;
+  border-bottom:1px solid var(--line);
+}
+.context-drawer-body h2{
+  font-size:15px;
+  margin:0 0 12px 0;
+  letter-spacing:-.2px;
+}
+.context-drawer-body dl{
+  display:grid;
+  grid-template-columns:110px minmax(0,1fr);
+  gap:8px 10px;
+  margin:0 0 14px 0;
+  font-size:11.5px;
+}
+.context-drawer-body dt{
+  font:9.5px var(--mono);
+  color:var(--muted);
+  text-transform:uppercase;
+}
+.context-drawer-body dd{
+  margin:0;
+  word-break:break-word;
+  color:#e8e8f0;
+}
+
+/* Global Cmd+K Command & Pivot Palette */
+.cmdk-dialog{
+  max-width:680px;
+  width:92vw;
+}
+.cmdk-body{
+  display:flex;
+  flex-direction:column;
+  gap:12px;
+}
+.cmdk-input{
+  width:100%;
+  font-size:13.5px;
+  padding:12px 16px;
+}
+.cmdk-results{
+  display:flex;
+  flex-direction:column;
+  gap:8px;
+  max-height:380px;
+  overflow-y:auto;
+}
+.cmdk-item{
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  gap:12px;
+  padding:10px 14px;
+  border:1px solid var(--line);
+  border-radius:var(--r-md);
+  background:#15151c;
+  cursor:pointer;
+  text-align:left;
+  width:100%;
+  transition:border-color .15s ease,background .15s ease;
+}
+.cmdk-item:hover,.cmdk-item:focus{
+  border-color:var(--red);
+  background:#1c171b;
+  outline:none;
+}
+.cmdk-item-title{
+  font:12px var(--sans);
+  color:#f0f0f6;
+  font-weight:500;
+}
+.cmdk-item-sub{
+  font:10px var(--mono);
+  color:var(--muted);
+}
+
+/* Operations, Run Diff & ACH Matrix */
+.diff-badge-added{
+  color:#8ce0a8;
+  border-color:rgba(140,224,168,.38);
+  background:rgba(38,85,55,.22);
+}
+.diff-badge-removed{
+  color:#f29b9b;
+  border-color:rgba(196,104,104,.4);
+  background:rgba(110,36,42,.22);
+}
+.ach-card{
+  border:1px solid var(--line);
+  border-radius:var(--r-md);
+  background:#15151c;
+  padding:16px 18px;
+  margin-bottom:12px;
+}
+.ach-rating-row{
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  gap:10px;
+  padding:8px 0;
+  border-bottom:1px solid rgba(255,255,255,.05);
+  font-size:12px;
+}
+.ach-rating-row:last-child{border-bottom:none}
+.graph-node.highlighted{
+  stroke:#8ce0a8;
+  stroke-width:2.5px;
+  fill:#192c21;
+}
+.graph-edge.highlighted{
+  stroke:#8ce0a8;
+  stroke-width:2.5px;
+  opacity:1;
+}
+.svg-pan-active{cursor:grabbing !important}
+.geo-map-canvas svg,.source-chart-canvas svg,.graph-canvas svg{cursor:grab}
+
 @media(max-width:1150px){
+  .detail-split-layout.drawer-open{grid-template-columns:1fr}
+  .context-drawer{position:static;max-height:none}
   .workbench-grid{grid-template-columns:1fr}
   .workbench-dock{position:static;max-height:none}
   .workbench-overview-cards{grid-template-columns:1fr}

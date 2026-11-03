@@ -56,7 +56,7 @@ PIR_TEMPLATES: dict[str, list[tuple[str, frozenset[str]]]] = {
     ],
     "web-response": [
         ("What HTTPS and security headers are observed on the company website?",
-         frozenset({"http.status", "tls.connection.validated", "http.security_header"})),
+         frozenset({"http.status", "tls.connection.validated", "http.security_header", "security_txt.contact"})),
     ],
     "tool-discovery": [
         ("Which hostnames do installed passive discovery tools report?",
@@ -68,7 +68,7 @@ PIR_TEMPLATES: dict[str, list[tuple[str, frozenset[str]]]] = {
     ],
     "ip-infrastructure": [
         ("What network ownership, open ports, CPEs, and CVEs are observed for this IP?",
-         frozenset({"host.port", "host.cpe", "host.vuln", "host.org", "host.network_name"})),
+         frozenset({"host.port", "host.cpe", "host.vuln", "host.org", "host.network_name", "bgp.prefix"})),
     ],
     "attack-surface": [
         (

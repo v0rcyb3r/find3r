@@ -11,6 +11,7 @@ import csv
 import hashlib
 import io
 import ipaddress
+import json
 import math
 import re
 from typing import Any
@@ -245,11 +246,11 @@ def build_geo_map(company: str, facts: list[dict], subject_kind: str = "company"
                         rec["lon"] = lon_f
                 except ValueError:
                     pass
-            elif attr in ("host.org", "host.isp") and not rec["org"]:
+            elif attr in ("host.org", "host.isp", "bgp.holder") and not rec["org"]:
                 rec["org"] = val
             elif attr in ("host.asn", "host.asn_name") and not rec["asn"]:
                 rec["asn"] = val
-            elif attr == "host.cidr":
+            elif attr in ("host.cidr", "bgp.prefix") and not rec["cidr"]:
                 rec["cidr"] = val
 
     points: list[dict[str, Any]] = []
@@ -533,3 +534,286 @@ def build_maltego_transform_xml(facts: list[dict[str, Any]]) -> str:
         "</MaltegoMessage>",
     ]
     return "\n".join(lines) + "\n"
+
+
+def _deterministic_stix_id(stix_type: str, key: str) -> str:
+    import uuid
+    ns = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+    return f"{stix_type}--{uuid.uuid5(ns, f'find3r:{stix_type}:{key}')}"
+
+
+def build_stix_bundle(brief: dict[str, Any]) -> str:
+    """Export an investigation brief as a STIX 2.1 JSON Bundle for OpenCTI / MISP."""
+    from datetime import datetime, timezone
+
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    company = str(brief.get("company") or "unknown")
+    run_id = str(brief.get("run_id") or "0" * 32)
+    facts = brief.get("facts") or []
+
+    producer_id = _deterministic_stix_id("identity", "find3r-osint-console")
+    target_id = _deterministic_stix_id("identity", f"target:{company}")
+    objects: list[dict[str, Any]] = [
+        {
+            "type": "identity",
+            "spec_version": "2.1",
+            "id": producer_id,
+            "created": now_iso,
+            "modified": now_iso,
+            "name": "Find3r Intelligence Console",
+            "identity_class": "system",
+        },
+        {
+            "type": "identity",
+            "spec_version": "2.1",
+            "id": target_id,
+            "created": now_iso,
+            "modified": now_iso,
+            "name": company,
+            "identity_class": "organization",
+            "description": f"Find3r investigation target ({brief.get('subject_kind') or 'domain'}) — run {run_id}",
+        },
+    ]
+    seen_ids: set[str] = {producer_id, target_id}
+    object_refs: list[str] = [target_id]
+
+    def add_obj(obj: dict[str, Any]) -> str:
+        oid = obj["id"]
+        if oid not in seen_ids:
+            seen_ids.add(oid)
+            objects.append(obj)
+            object_refs.append(oid)
+        return oid
+
+    def add_rel(src_id: str, rel_type: str, dst_id: str, desc: str = "") -> None:
+        rid = _deterministic_stix_id("relationship", f"{src_id}:{rel_type}:{dst_id}")
+        if rid in seen_ids:
+            return
+        seen_ids.add(rid)
+        rel_obj: dict[str, Any] = {
+            "type": "relationship",
+            "spec_version": "2.1",
+            "id": rid,
+            "created": now_iso,
+            "modified": now_iso,
+            "relationship_type": rel_type,
+            "source_ref": src_id,
+            "target_ref": dst_id,
+            "created_by_ref": producer_id,
+        }
+        if desc:
+            rel_obj["description"] = desc
+        objects.append(rel_obj)
+        object_refs.append(rid)
+
+    for f in facts:
+        attr = str(f.get("attribute") or "")
+        val = str(f.get("value") or "").strip()
+        subj = str(f.get("subject") or company).strip()
+        src = str(f.get("source") or "find3r")
+        grade = str(f.get("admiralty") or "C3")
+        if not val:
+            continue
+
+        if attr in ("dns.subdomain", "discovery.subdomain", "dns.mx", "dns.ns", "dns.cname", "host.reverse_dns"):
+            dom_id = add_obj({
+                "type": "domain-name",
+                "spec_version": "2.1",
+                "id": _deterministic_stix_id("domain-name", val.lower()),
+                "value": val.lower(),
+            })
+            add_rel(target_id, "has", dom_id, f"{attr} via {src} ({grade})")
+        elif attr in ("dns.a", "dns.passive.ipv4") and _is_valid_ip(val):
+            ip_id = add_obj({
+                "type": "ipv4-addr",
+                "spec_version": "2.1",
+                "id": _deterministic_stix_id("ipv4-addr", val),
+                "value": val,
+            })
+            subj_id = add_obj({
+                "type": "domain-name",
+                "spec_version": "2.1",
+                "id": _deterministic_stix_id("domain-name", subj.lower()),
+                "value": subj.lower(),
+            }) if not _is_valid_ip(subj) else target_id
+            add_rel(subj_id, "resolves-to", ip_id, f"{attr} via {src} ({grade})")
+        elif attr in ("dns.aaaa", "dns.passive.ipv6") and _is_valid_ip(val):
+            ip6_id = add_obj({
+                "type": "ipv6-addr",
+                "spec_version": "2.1",
+                "id": _deterministic_stix_id("ipv6-addr", val),
+                "value": val,
+            })
+            add_rel(target_id, "resolves-to", ip6_id, f"{attr} via {src} ({grade})")
+        elif attr == "host.vuln":
+            vuln_id = add_obj({
+                "type": "vulnerability",
+                "spec_version": "2.1",
+                "id": _deterministic_stix_id("vulnerability", val.upper()),
+                "created": now_iso,
+                "modified": now_iso,
+                "name": val.upper(),
+                "description": f"Observed on {subj} via {src} (Admiralty {grade})",
+            })
+            if _is_valid_ip(subj):
+                ip_id = add_obj({
+                    "type": "ipv4-addr",
+                    "spec_version": "2.1",
+                    "id": _deterministic_stix_id("ipv4-addr", subj),
+                    "value": subj,
+                })
+                add_rel(ip_id, "has", vuln_id, f"CVE match via {src}")
+            else:
+                add_rel(target_id, "has", vuln_id, f"CVE match via {src}")
+        elif attr == "host.asn":
+            num_str = re.sub(r"[^0-9]", "", val)
+            if num_str.isdigit():
+                as_id = add_obj({
+                    "type": "autonomous-system",
+                    "spec_version": "2.1",
+                    "id": _deterministic_stix_id("autonomous-system", num_str),
+                    "number": int(num_str),
+                    "name": val,
+                })
+                if _is_valid_ip(subj):
+                    ip_id = add_obj({
+                        "type": "ipv4-addr",
+                        "spec_version": "2.1",
+                        "id": _deterministic_stix_id("ipv4-addr", subj),
+                        "value": subj,
+                    })
+                    add_rel(ip_id, "belongs-to", as_id, f"ASN via {src}")
+        elif attr in ("company.business_email", "person.business_email"):
+            em_id = add_obj({
+                "type": "email-addr",
+                "spec_version": "2.1",
+                "id": _deterministic_stix_id("email-addr", val.lower()),
+                "value": val.lower(),
+            })
+            add_rel(target_id, "related-to", em_id, f"{attr} via {src}")
+
+    report_id = _deterministic_stix_id("report", run_id)
+    objects.append({
+        "type": "report",
+        "spec_version": "2.1",
+        "id": report_id,
+        "created": now_iso,
+        "modified": now_iso,
+        "name": f"Find3r OSINT Assessment: {company}",
+        "description": f"Guarded OSINT intelligence report for {company} ({len(facts)} observations).",
+        "published": now_iso,
+        "report_types": ["threat-report", "attack-pattern"],
+        "object_refs": object_refs[:500],
+        "created_by_ref": producer_id,
+    })
+
+    bundle = {
+        "type": "bundle",
+        "id": _deterministic_stix_id("bundle", run_id),
+        "objects": objects,
+    }
+    return json.dumps(bundle, indent=2, ensure_ascii=False) + "\n"
+
+
+def build_html_dossier(brief: dict[str, Any]) -> str:
+    """Render a self-contained, print-ready Executive HTML Intelligence Dossier."""
+    company = _xml_escape(brief.get("company") or "Target")
+    run_id = _xml_escape(brief.get("run_id") or "")
+    subject_kind = _xml_escape(brief.get("subject_kind") or "domain")
+    posture = brief.get("posture") or {}
+    overall = posture.get("overall") or {"letter": "N/A", "score": "—", "rationale": ""}
+    exposures = brief.get("exposures") or []
+    facts = brief.get("facts") or []
+    geo = brief.get("geo_map") or {}
+    geo_points = geo.get("points") or []
+
+    exp_rows = []
+    for e in exposures[:25]:
+        exp_rows.append(
+            f"<tr><td><strong>{_xml_escape(str(e.get('severity') or '').upper())}</strong></td>"
+            f"<td>{_xml_escape(e.get('title'))}</td>"
+            f"<td><code>{_xml_escape(e.get('observed'))}</code></td>"
+            f"<td>{_xml_escape(e.get('remediation'))}</td></tr>"
+        )
+    exp_table = "\n".join(exp_rows) if exp_rows else '<tr><td colspan="4">No actionable exposures triggered.</td></tr>'
+
+    geo_rows = []
+    for pt in geo_points[:30]:
+        geo_rows.append(
+            f"<tr><td><code>{_xml_escape(pt.get('ip'))}</code></td>"
+            f"<td>{_xml_escape(pt.get('city'))}, {_xml_escape(pt.get('country'))}</td>"
+            f"<td>{_xml_escape(pt.get('asn'))} · {_xml_escape(pt.get('org'))}</td>"
+            f"<td>{_xml_escape(', '.join(pt.get('ports') or []) or 'none')}</td>"
+            f"<td>{_xml_escape(', '.join(pt.get('vulns') or []) or 'none')}</td></tr>"
+        )
+    geo_table = "\n".join(geo_rows) if geo_rows else '<tr><td colspan="5">No routable IPv4/IPv6 hosts observed.</td></tr>'
+
+    fact_rows = []
+    for f in facts[:120]:
+        fact_rows.append(
+            f"<tr><td><code>{_xml_escape(f.get('admiralty'))}</code></td>"
+            f"<td>{_xml_escape(f.get('source'))}</td>"
+            f"<td><code>{_xml_escape(f.get('subject'))}</code></td>"
+            f"<td><code>{_xml_escape(f.get('attribute'))}</code></td>"
+            f"<td>{_xml_escape(str(f.get('value'))[:180])}</td></tr>"
+        )
+    fact_table = "\n".join(fact_rows) if fact_rows else '<tr><td colspan="5">No guarded observations.</td></tr>'
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Find3r Intelligence Dossier — {company}</title>
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, "Inter", sans-serif; color: #111; background: #fff; margin: 36px auto; max-width: 1020px; padding: 0 24px; line-height: 1.5; }}
+    header {{ border: 1px solid #d8d8d8; border-radius: 16px; padding: 24px 28px; margin-bottom: 24px; display: flex; justify-content: space-between; align-items: center; }}
+    h1 {{ margin: 0 0 6px 0; font-size: 24px; letter-spacing: -0.02em; }}
+    h2 {{ font-size: 13px; text-transform: uppercase; letter-spacing: 0.12em; color: #444; margin: 28px 0 12px 0; }}
+    .meta {{ font-size: 12px; color: #555; font-family: ui-monospace, monospace; }}
+    .grade-pill {{ border: 1px solid #111; border-radius: 999px; padding: 8px 18px; font-weight: 700; font-size: 18px; }}
+    .grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 24px; }}
+    .card {{ border: 1px solid #e0e0e0; border-radius: 14px; padding: 14px 16px; }}
+    .card span {{ display: block; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: #666; }}
+    .card strong {{ font-size: 20px; font-family: ui-monospace, monospace; }}
+    table {{ width: 100%; border-collapse: separate; border-spacing: 0; border: 1px solid #e0e0e0; border-radius: 14px; overflow: hidden; font-size: 12px; margin-bottom: 20px; }}
+    th, td {{ padding: 9px 12px; text-align: left; border-bottom: 1px solid #eee; vertical-align: top; }}
+    th {{ background: #f7f7f7; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: #444; }}
+    tr:last-child td {{ border-bottom: none; }}
+    code {{ font-family: ui-monospace, monospace; font-size: 11px; background: #f3f3f3; padding: 2px 6px; border-radius: 6px; }}
+    @media print {{ body {{ margin: 12px; }} }}
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <div class="meta">FIND3R INTELLIGENCE DOSSIER · ADMIRALTY GUARDED BRIEFING</div>
+      <h1>{company}</h1>
+      <div class="meta">Run ID: {run_id} · Kind: {subject_kind} · Guarded Facts: {len(facts)}</div>
+    </div>
+    <div class="grade-pill">Grade {_xml_escape(overall.get("letter"))} ({_xml_escape(overall.get("score"))})</div>
+  </header>
+  <div class="grid">
+    <div class="card"><span>Guarded Facts</span><strong>{len(facts)}</strong></div>
+    <div class="card"><span>Exposures</span><strong>{len(exposures)}</strong></div>
+    <div class="card"><span>Mapped IP Hosts</span><strong>{len(geo_points)}</strong></div>
+    <div class="card"><span>Sources Active</span><strong>{len({f.get("source") for f in facts})}</strong></div>
+  </div>
+  <h2>Prioritized Security Exposures</h2>
+  <table>
+    <thead><tr><th>Severity</th><th>Exposure</th><th>Observed</th><th>Remediation</th></tr></thead>
+    <tbody>{exp_table}</tbody>
+  </table>
+  <h2>Geospatial &amp; ASN Infrastructure Inventory</h2>
+  <table>
+    <thead><tr><th>IP Address</th><th>Jurisdiction</th><th>ASN / Operator</th><th>Open Ports</th><th>CVEs</th></tr></thead>
+    <tbody>{geo_table}</tbody>
+  </table>
+  <h2>Guarded Evidence Ledger (Top 120)</h2>
+  <table>
+    <thead><tr><th>Grade</th><th>Source</th><th>Subject</th><th>Attribute</th><th>Value</th></tr></thead>
+    <tbody>{fact_table}</tbody>
+  </table>
+</body>
+</html>
+"""
+
