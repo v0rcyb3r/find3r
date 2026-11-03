@@ -46,6 +46,10 @@ PIR_TEMPLATES: dict[str, list[tuple[str, frozenset[str]]]] = {
         ("What public profiles, organizations, PGP keys, and biographical records match this person name?",
          frozenset({"public.person", "public.account", "public.profile"})),
     ],
+    "breach-exposure": [
+        ("What breach datasets, credential-exposure counts, and correlated records are reported in DeHashed or Intelligence X?",
+         frozenset({"dehashed.breach"})),
+    ],
     "company-contacts": [
         ("Which business emails and phone numbers does the company publish?",
          frozenset({"company.business_email", "company.business_phone"})),

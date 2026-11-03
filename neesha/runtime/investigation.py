@@ -62,6 +62,11 @@ INFRA_ATTRIBUTES = frozenset({
     'whois.nameserver', 'whois.status', 'whois.org', 'whois.network_name', 'whois.cidr', 'whois.country',
     'intelx.record.name', 'intelx.record.bucket', 'intelx.record.date', 'intelx.record.media',
     'intelx.search.sample_count', 'intelx.search.is_partial',
+    'dehashed.search.total_count', 'dehashed.search.sample_count',
+    'dehashed.breach.secret_exposure_count', 'dehashed.breach.hash_exposure_count',
+    'dehashed.breach.exposed_fields', 'dehashed.breach.database', 'dehashed.breach.hash_type',
+    'dehashed.breach.email', 'dehashed.breach.username', 'dehashed.breach.ip_address',
+    'dehashed.breach.phone', 'dehashed.breach.name', 'dehashed.breach.company',
 })
 COMPANY_ATTRIBUTES = frozenset({
     'company.business_email', 'company.business_phone', 'company.social_url',
@@ -88,6 +93,12 @@ PUBLIC_EMAIL_ATTRIBUTES = frozenset({
     'public.email.emailrep.deliverable', 'public.email.emailrep.profile_hint',
     'public.account.found', 'public.account.url', 'public.account.recovery_hint',
     'public.account.summary.count',
+    'public.email.breach_exposure', 'public.dehashed.breach_database',
+    'dehashed.search.total_count', 'dehashed.search.sample_count',
+    'dehashed.breach.secret_exposure_count', 'dehashed.breach.hash_exposure_count',
+    'dehashed.breach.exposed_fields', 'dehashed.breach.database', 'dehashed.breach.hash_type',
+    'dehashed.breach.email', 'dehashed.breach.username', 'dehashed.breach.ip_address',
+    'dehashed.breach.phone', 'dehashed.breach.name', 'dehashed.breach.company',
 })
 ID = re.compile(r'[A-Za-z0-9_-]{1,64}\Z')
 SECRET_PATTERN = re.compile(

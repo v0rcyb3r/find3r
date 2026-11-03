@@ -593,16 +593,48 @@ def grade_brief_posture(facts: list[dict]) -> dict:
     port_rows = by_attr.get('host.port', [])
     leak_rows = by_attr.get('public.email.emailrep.credentials_leaked', [])
     breach_rows = by_attr.get('public.email.emailrep.data_breach', [])
+    xon_breach_rows = by_attr.get('public.email.breach_exposure', [])
+    dehashed_db_rows = by_attr.get('dehashed.breach.database', [])
+    dehashed_secret_rows = [
+        r for r in by_attr.get('dehashed.breach.secret_exposure_count', [])
+        if r['value'].isdigit() and int(r['value']) > 0
+    ]
+    dehashed_total_rows = [
+        r for r in by_attr.get('dehashed.search.total_count', [])
+        if r['value'].isdigit() and int(r['value']) > 0
+    ]
     intelx_rows = by_attr.get('intelx.record.bucket', []) + [
         r for r in by_attr.get('intelx.search.sample_count', [])
         if r['value'].isdigit() and int(r['value']) > 0
     ]
     ip_rows = by_attr.get('dns.a', [])
 
-    if vuln_rows or port_rows or leak_rows or breach_rows or intelx_rows or ip_rows:
+    if (
+        vuln_rows
+        or port_rows
+        or leak_rows
+        or breach_rows
+        or xon_breach_rows
+        or dehashed_db_rows
+        or dehashed_secret_rows
+        or dehashed_total_rows
+        or intelx_rows
+        or ip_rows
+    ):
         net_score = 100
         net_reasons = []
-        net_evidence = vuln_rows + port_rows + leak_rows + breach_rows + intelx_rows + ip_rows
+        net_evidence = (
+            vuln_rows
+            + port_rows
+            + leak_rows
+            + breach_rows
+            + xon_breach_rows
+            + dehashed_db_rows
+            + dehashed_secret_rows
+            + dehashed_total_rows
+            + intelx_rows
+            + ip_rows
+        )
 
         if vuln_rows:
             cves = sorted({r['value'] for r in vuln_rows})
@@ -675,6 +707,48 @@ def grade_brief_posture(facts: list[dict]) -> dict:
                 'Review matching Intelligence X record metadata and rotate any exposed secrets or session tokens.',
                 'Identity / SecOps',
                 intelx_rows,
+            ))
+
+        if dehashed_secret_rows:
+            sec_cnt = int(dehashed_secret_rows[0]['value'])
+            net_score -= 35
+            net_reasons.append(f"DeHashed cleartext secret exposure ({sec_cnt} record(s))")
+            exposures.append(_exposure(
+                'exp-dehashed-secrets', 'critical', 'Identity & Credential Exposure',
+                f'DeHashed Cleartext Credential Exposure ({sec_cnt} Record(s))',
+                f'{sec_cnt} DeHashed breach record(s) contained exposed authentication secrets',
+                'Cleartext credential material associated with this selector or domain appears in indexed breach corpuses, creating immediate credential-stuffing and initial-access risk.',
+                'Force immediate password resets for affected accounts, revoke active OAuth/session tokens, and enforce FIDO2/WebAuthn MFA.',
+                'Identity / SecOps',
+                dehashed_secret_rows + dehashed_db_rows,
+            ))
+        elif dehashed_db_rows or dehashed_total_rows:
+            dbs = sorted({r['value'] for r in dehashed_db_rows})
+            total_val = dehashed_total_rows[0]['value'] if dehashed_total_rows else str(len(dbs))
+            net_score -= 20
+            net_reasons.append(f"DeHashed breach hits ({total_val} record(s) across {', '.join(dbs[:4]) or 'indexed datasets'})")
+            exposures.append(_exposure(
+                'exp-dehashed-breach', 'high', 'Identity & Credential Exposure',
+                f"DeHashed Breach Corpus Presence ({total_val} Record(s))",
+                f"Datasets: {', '.join(dbs[:6]) or 'DeHashed breach index'}",
+                'Target selectors appear in DeHashed breach datasets, exposing organizational or personal identity metadata and potential password hashes.',
+                'Audit affected corporate or personal accounts, rotate credentials created prior to the breach dates, and monitor for targeted phishing.',
+                'Identity / SecOps',
+                dehashed_db_rows + dehashed_total_rows,
+            ))
+
+        if xon_breach_rows:
+            breaches = sorted({r['value'] for r in xon_breach_rows})
+            net_score -= min(25, 10 + len(breaches) * 3)
+            net_reasons.append(f"Public breach exposures ({len(breaches)}: {', '.join(breaches[:4])})")
+            exposures.append(_exposure(
+                'exp-xon-breaches', 'high', 'Identity & Credential Exposure',
+                f"Email Observed in {len(breaches)} Public Data Breach(es)",
+                ', '.join(breaches[:8]),
+                'The email address appears in verified public breach notifications, increasing risk of credential reuse and targeted social engineering.',
+                'Rotate credentials across all services where this email is registered and enable multi-factor authentication.',
+                'Identity / SecOps',
+                xon_breach_rows,
             ))
 
         if not net_reasons and ip_rows:

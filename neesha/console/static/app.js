@@ -577,15 +577,15 @@ function renderView() {
 
   if (tab === 'infrastructure' && isEmailBrief()) {
     view.append(
-      text('p', 'Domain, telecom, and network context describes the provider or public mentions, not verified personal infrastructure.', 'notice email-context'),
-      table(brief.facts.filter(f => /^(email\.domain|email\.syntax|public\.email\.(syntax|local_part|mailbox_type|provider|deliverable_mx|mx_host|domain_spf|domain_dmarc|checked_services|breach_exposure)|public\.phone\.|public\.person\.|public\.profile\.|dns|host|whois|intelx)\./.test(f.attribute + '.')), true)
+      text('p', 'Domain, telecom, breach, and network context describes the provider or public mentions, not verified personal infrastructure.', 'notice email-context'),
+      table(brief.facts.filter(f => /^(email\.domain|email\.syntax|public\.email\.(syntax|local_part|mailbox_type|provider|deliverable_mx|mx_host|domain_spf|domain_dmarc|checked_services|breach_exposure)|public\.dehashed\.|public\.phone\.|public\.person\.|public\.profile\.|dns|host|whois|intelx|dehashed)\./.test(f.attribute + '.')), true)
     );
     return;
   }
   if (tab === 'infrastructure') {
     view.append(
-      text('p', 'DNS, TLS certificates, HTTP headers, Shodan InternetDB ports/CVEs, RIPEstat BGP/ASN routing, RFC 9116 security.txt, RDAP registration, passive subdomains, and web technology fingerprints.', 'notice'),
-      table(brief.facts.filter(f => /^(dns|dnssec|tls|http|ip|bgp|security_txt|host|whois|tech|web|discovery|intelx|email\.(dmarc|spf|dkim|mtasts|tlsrpt))\./.test(f.attribute)), true)
+      text('p', 'DNS, TLS certificates, HTTP headers, Shodan InternetDB ports/CVEs, RIPEstat BGP/ASN routing, RFC 9116 security.txt, RDAP registration, DeHashed/IntelX breach metadata, passive subdomains, and web technology fingerprints.', 'notice'),
+      table(brief.facts.filter(f => /^(dns|dnssec|tls|http|ip|bgp|security_txt|host|whois|tech|web|discovery|intelx|dehashed|email\.(dmarc|spf|dkim|mtasts|tlsrpt))\./.test(f.attribute)), true)
     );
     return;
   }
@@ -598,7 +598,7 @@ function renderView() {
   }
   if (tab === 'people' && isEmailBrief()) {
     view.append(text('p', 'Public associations must be linked by the exact selector. A public mention or account-registration observation does not establish real-world identity, employment, or buying authority.', 'notice email-context'));
-    const publicFacts = brief.facts.filter(f => !isRegistration(f) && /^(public|email\.public|person|intelx)\./.test(f.attribute));
+    const publicFacts = brief.facts.filter(f => !isRegistration(f) && /^(public|email\.public|person|intelx|dehashed)\./.test(f.attribute));
     const registrations = brief.facts.filter(isRegistration);
     view.append(text('h2', kind === 'email' ? 'Public email evidence' : 'Public identity & handle evidence'), table(publicFacts, true));
     if (registrations.length) {
@@ -617,6 +617,14 @@ function renderView() {
       if (!people.has(key)) people.set(key, []);
       people.get(key).push(f);
     });
+    const breachFacts = brief.facts.filter(f => f.attribute.startsWith('dehashed.') || f.attribute.startsWith('intelx.'));
+    if (breachFacts.length) {
+      view.append(
+        text('h2', 'DeHashed & Breach Corpus Intelligence'),
+        text('p', 'Sanitized breach dataset attributions, credential-exposure counts, and associated corporate selectors indexed by DeHashed / Intelligence X. Cleartext passwords and hashes are stripped in memory.', 'notice'),
+        table(breachFacts, true)
+      );
+    }
     const published = brief.facts.filter(f => f.attribute.startsWith('company.business_') || f.attribute === 'company.contact_page' || f.attribute === 'company.social_url');
     if (published.length) {
       view.append(

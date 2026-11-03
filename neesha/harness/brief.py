@@ -41,7 +41,10 @@ def build_brief(engine: sa.Engine, run_id: str, profile=None) -> dict:
             schema.fact.c.sensitivity == 'business',
             sa.and_(schema.fact.c.sensitivity == 'personal',
                     schema.fact.c.entity_id == run['company_id'],
-                    schema.fact.c.attribute.startswith('public.', autoescape=True)),
+                    sa.or_(
+                        schema.fact.c.attribute.startswith('public.', autoescape=True),
+                        schema.fact.c.attribute.startswith('dehashed.', autoescape=True),
+                    )),
         ) if root_subject else schema.fact.c.sensitivity == 'business')
         requirements = [dict(row) for row in conn.execute(
             sa.select(schema.pir).where(schema.pir.c.run_id == run_id)

@@ -51,11 +51,20 @@ def build_graph(company: str, facts: list[dict], subject_kind: str = "company") 
         if root_kind in ('email', 'username'):
             # Public provider metadata is not proof of identity, ownership, or
             # account registration. Never create a person/company from a label.
-            if not attr.startswith(('public.', 'intelx.')):
+            if not attr.startswith(('public.', 'intelx.', 'dehashed.')):
                 continue
             if attr == 'public.account.found' or attr.startswith('public.account.found'):
                 account = node('account', str(fact.get('source', '')) + ':' + value, value)
                 link(seed, account, 'account_observed', fact)
+            elif attr == 'dehashed.breach.username':
+                account = node('account', 'dehashed:' + value, value)
+                link(seed, account, 'breach_observed_username', fact)
+            elif attr == 'dehashed.breach.email':
+                em_node = node('email', value.lower(), value)
+                link(seed, em_node, 'breach_observed_email', fact)
+            elif attr == 'dehashed.breach.ip_address':
+                ip_node = node('ip', value, value)
+                link(seed, ip_node, 'breach_observed_ip', fact)
             elif attr == 'public.email.handle_correlation':
                 account = node('account', 'handle:' + value, value)
                 link(seed, account, 'handle_correlation', fact)
@@ -124,19 +133,25 @@ def build_graph(company: str, facts: list[dict], subject_kind: str = "company") 
             target_parent = node('ip', subject, subject) if re.match(r'^\d{1,3}(?:\.\d{1,3}){3}$', subject) else seed
             obs = node('observation', attr + ':' + value, attr + ' = ' + value)
             link(target_parent, obs, 'host_telemetry', fact)
-        elif attr in ('company.business_email','person.business_email'):
+        elif attr in ('company.business_email','person.business_email','dehashed.breach.email'):
             email=node('email',value.lower(),value)
-            link(person or org,email,'published_business_email',fact)
-        elif attr in ('company.business_phone','person.business_phone'):
+            link(person or org,email,'breach_observed_email' if attr == 'dehashed.breach.email' else 'published_business_email',fact)
+        elif attr == 'dehashed.breach.username':
+            acct=node('account','dehashed:'+value,value)
+            link(org or seed,acct,'breach_observed_username',fact)
+        elif attr == 'dehashed.breach.ip_address':
+            ip_node=node('ip',value,value)
+            link(org or seed,ip_node,'breach_observed_ip',fact)
+        elif attr in ('company.business_phone','person.business_phone','dehashed.breach.phone'):
             phone=node('phone',company+':'+re.sub(r'[^\d+]','',value),value)
-            link(person or org,phone,'published_business_phone',fact)
+            link(person or org,phone,'breach_observed_phone' if attr == 'dehashed.breach.phone' else 'published_business_phone',fact)
         elif attr == 'company.social_url':
             url=node('url',value,value)
             link(org or seed,url,'social_profile',fact)
         elif attr in ('company.contact_page','person.profile_url','web.archive.url','web.observed.url'):
             url=node('url',value,value)
             link(person or seed,url,'archived_url' if attr=='web.archive.url' else 'observed_url',fact)
-        elif attr.startswith(('http.','tls.','email.','dns.','dnssec.','whois.','tech.','web.','intelx.')):
+        elif attr.startswith(('http.','tls.','email.','dns.','dnssec.','whois.','tech.','web.','intelx.','dehashed.')):
             observation=node('observation',attr+':'+value,attr+' = '+value)
             link(seed,observation,'observed',fact)
     return {'nodes':list(nodes.values()),'edges':list(edges.values()),

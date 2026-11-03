@@ -34,6 +34,8 @@ STATIC = Path(__file__).parent / 'static'
 ALLOWED_SETTING_KEYS = (
     'VULTR_API_KEY',
     'SHODAN_API_KEY',
+    'DEHASHED_API_KEY',
+    'DEHASHED_EMAIL',
     'HUNTER_API_KEY',
     'EMAILREP_API_KEY',
     'INTELX_API_KEY',
@@ -590,7 +592,10 @@ class Workspace:
         now = datetime.now(timezone.utc)
         engagement_id = uuid4().hex
         is_personal_kind = subject_kind in ('email', 'username', 'phone', 'person')
-        techniques = frozenset({'account_enumeration'}) if subject_kind in ('email', 'username') else frozenset()
+        tech_set = {'account_enumeration'} if subject_kind in ('email', 'username') else set()
+        if os.environ.get('DEHASHED_API_KEY') or os.environ.get('INTELX_API_KEY') or payload.get('breach_metadata') is True:
+            tech_set.add('breach_metadata')
+        techniques = frozenset(tech_set)
         engagement = EngagementView(
             id=engagement_id,
             authority_basis='public_research' if is_personal_kind else 'prospect_company',
@@ -774,6 +779,8 @@ class Workspace:
                         'attack-surface', 'company-contacts', 'email-posture', 'public-history',
                         'web-response', 'tool-discovery', 'whois-registration', 'ip-infrastructure',
                     ) + (('who-to-contact',) if contacts else ())
+                if 'dehashed' in available:
+                    pir_templates = pir_templates + ('breach-exposure',)
 
                 report = execute_run(
                     engine=self.engine, ledger=ledger, gate=PolicyGate(self.engine, ledger),

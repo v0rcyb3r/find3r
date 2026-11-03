@@ -140,21 +140,115 @@ def test_intelx_metadata_only_accepts_domain_seeds(domain):
         IntelXAdapter().search(Request('domain', domain))
 
 
-def test_dehashed_is_explicitly_unavailable_until_official_contract_is_verified(monkeypatch):
-    monkeypatch.setenv('DEHASHED_API_KEY', 'a-key-does-not-make-a-contract')
+def test_dehashed_requires_api_key_and_positive_cost_estimate(monkeypatch):
+    monkeypatch.delenv('DEHASHED_API_KEY', raising=False)
+    monkeypatch.delenv('DEHASHED_KEY', raising=False)
     adapter = DeHashedAdapter()
     assert adapter.availability()['available'] is False
-    assert adapter.produces == frozenset()
     assert adapter.default_enabled is False
     assert adapter.tier == 'C'
-    with pytest.raises(AdapterError, match='not verified'):
+    assert adapter.requires_techniques == frozenset({'breach_metadata'})
+    with pytest.raises(AdapterError, match='key is not configured'):
+        adapter.fetch(adapter.search(SEED)[0])
+
+    monkeypatch.setenv('DEHASHED_API_KEY', 'dh-secret-key')
+    monkeypatch.setenv('DEHASHED_ESTIMATED_USD_PER_SEARCH', '0')
+    with pytest.raises(AdapterError, match='positive'):
         adapter.estimate_cost(SEED)
-    with pytest.raises(AdapterError, match='not verified'):
-        adapter.search(SEED)
-    with pytest.raises(AdapterError, match='not verified'):
-        adapter.fetch(None)
-    with pytest.raises(AdapterError, match='not verified'):
-        adapter.parse(RawResult(b'{}', 'https://source.example'), SEED)
+
+
+def test_dehashed_v2_sanitizes_passwords_and_hashes_and_extracts_breach_intelligence(monkeypatch):
+    monkeypatch.setenv('DEHASHED_API_KEY', 'dh-secret-key')
+    monkeypatch.setenv('DEHASHED_ESTIMATED_USD_PER_SEARCH', '0.05')
+    adapter = DeHashedAdapter()
+    assert adapter.availability()['available'] is True
+
+    raw_provider_response = {
+        'total': 2,
+        'balance': 98,
+        'entries': [
+            {
+                'id': 'rec-1',
+                'email': ['alice@acme.com', 'ignored@otherdomain.com'],
+                'username': ['alice_ops'],
+                'password': ['CLEARTEXT-SECRET-NEVER-STORE'],
+                'hashed_password': ['HASH-SECRET-NEVER-STORE'],
+                'hash_type': 'bcrypt',
+                'ip_address': ['93.184.215.14'],
+                'phone': ['+14155552671'],
+                'name': ['Alice Ops'],
+                'company': ['Acme Corp'],
+                'address': ['123 Secret Home St'],
+                'vin': ['1HGCM82633A004352'],
+                'database_name': 'Collection1',
+            },
+            {
+                'id': 'rec-2',
+                'email': 'bob@acme.com',
+                'username': 'bob_dev',
+                'password': '',
+                'hashed_password': 'SECOND-HASH-NEVER-STORE',
+                'hash_type': 'sha256',
+                'database_name': 'LinkedIn',
+            },
+        ],
+    }
+    monkeypatch.setattr(adapter, '_request_json', lambda query: raw_provider_response)
+    ref = adapter.search(SEED)[0]
+    raw = adapter.fetch(ref)
+
+    # Verify zero credential, hash, address, or VIN material is stored in RawResult
+    for forbidden in (
+        b'CLEARTEXT-SECRET-NEVER-STORE',
+        b'HASH-SECRET-NEVER-STORE',
+        b'SECOND-HASH-NEVER-STORE',
+        b'123 Secret Home St',
+        b'1HGCM82633A004352',
+        b'ignored@otherdomain.com',
+    ):
+        assert forbidden not in raw.payload
+
+    facts = adapter.parse(raw, SEED)
+    by_attr = {}
+    for f in facts:
+        by_attr.setdefault(f.attribute, set()).add(f.value)
+
+    assert by_attr['dehashed.search.total_count'] == {'2'}
+    assert by_attr['dehashed.breach.secret_exposure_count'] == {'1'}
+    assert by_attr['dehashed.breach.hash_exposure_count'] == {'2'}
+    assert by_attr['dehashed.breach.database'] == {'Collection1', 'LinkedIn'}
+    assert by_attr['dehashed.breach.email'] == {'alice@acme.com', 'bob@acme.com'}
+    assert by_attr['dehashed.breach.username'] == {'alice_ops', 'bob_dev'}
+    assert by_attr['dehashed.breach.ip_address'] == {'93.184.215.14'}
+    assert by_attr['dehashed.breach.phone'] == {'+14155552671'}
+    assert by_attr['dehashed.breach.name'] == {'Alice Ops'}
+    assert by_attr['dehashed.breach.company'] == {'Acme Corp'}
+
+
+def test_dehashed_supports_email_username_ip_phone_and_person_selectors(monkeypatch):
+    monkeypatch.setenv('DEHASHED_API_KEY', 'dh-secret-key')
+    adapter = DeHashedAdapter()
+    captured_queries = []
+
+    def fake_request(query):
+        captured_queries.append(query)
+        return {
+            'total': 1,
+            'entries': [{
+                'email': ['dana@example.com'],
+                'username': ['dana_sec'],
+                'password': ['DO-NOT-STORE'],
+                'database_name': 'Canva',
+            }],
+        }
+
+    monkeypatch.setattr(adapter, '_request_json', fake_request)
+    email_req = Request('email', 'dana@example.com')
+    raw = adapter.fetch(adapter.search(email_req)[0])
+    facts = adapter.parse(raw, email_req)
+    assert captured_queries == ['email:dana@example.com']
+    assert all(f.entity_kind == 'email' and f.sensitivity == 'personal' for f in facts)
+    assert any(f.attribute == 'public.dehashed.breach_database' and f.value == 'Canva' for f in facts)
 
 
 def test_intelx_gate_requires_client_scope_technique_approval_and_budget(engine, configured):
