@@ -577,8 +577,8 @@ function renderView() {
 
   if (tab === 'infrastructure' && isEmailBrief()) {
     view.append(
-      text('p', 'Domain and network context describes the provider or public mentions, not verified personal infrastructure.', 'notice email-context'),
-      table(brief.facts.filter(f => /^(email\.domain|email\.syntax|public\.email\.(syntax|local_part|mailbox_type|provider|deliverable_mx|mx_host|domain_spf|domain_dmarc|checked_services)|dns|host|whois|intelx)\./.test(f.attribute + '.')), true)
+      text('p', 'Domain, telecom, and network context describes the provider or public mentions, not verified personal infrastructure.', 'notice email-context'),
+      table(brief.facts.filter(f => /^(email\.domain|email\.syntax|public\.email\.(syntax|local_part|mailbox_type|provider|deliverable_mx|mx_host|domain_spf|domain_dmarc|checked_services|breach_exposure)|public\.phone\.|public\.person\.|public\.profile\.|dns|host|whois|intelx)\./.test(f.attribute + '.')), true)
     );
     return;
   }

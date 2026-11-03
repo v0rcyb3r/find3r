@@ -58,7 +58,7 @@ class SherlockAdapter(AccountEnumAdapter):
         subject = normalize_subject("username", reference.label)
         with self._temp_cwd() as cwd:
             args = [self.binary(), "--print-found", "--no-color", "--no-txt",
-                    "--timeout", "10", subject]
+                    "--timeout", "5", subject]
             output = self._run(args, cwd)
         return self._sanitized(
             subject,

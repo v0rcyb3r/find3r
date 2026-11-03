@@ -176,9 +176,7 @@ class Repository:
         later run tell a still-present asset from a disappeared one.
         """
         canonical = name.strip().lower().rstrip(".")
-        if kind == "person":
-            canonical = identity_key or ("unresolved-observation:" + _id())
-        if self.subject_kind in ("email", "username", "ip", "phone"):
+        if self.subject_kind in ("email", "username", "ip", "phone", "person"):
             if kind == self.subject_kind:
                 from neesha.resolve.intake import resolve_seed
 
@@ -188,8 +186,10 @@ class Repository:
                         schema.entity.c.id == self.company_id
                     )
                 ).scalar_one()
-                if canonical == root_name:
+                if canonical.lower() == root_name.lower():
                     return self.company_id
+        if kind == "person":
+            canonical = identity_key or ("unresolved-observation:" + _id())
         if kind == "company" and self.subject_kind in ("company", "domain"):
             return self.company_id
 

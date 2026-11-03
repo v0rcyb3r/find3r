@@ -38,6 +38,14 @@ PIR_TEMPLATES: dict[str, list[tuple[str, frozenset[str]]]] = {
         ("On which services does an account exist for this exact username?",
          frozenset({"public.account"})),
     ],
+    "phone-public-presence": [
+        ("What E.164 numbering plan, carrier/region, and public web mentions exist for this phone number?",
+         frozenset({"public.phone", "public.account"})),
+    ],
+    "person-public-presence": [
+        ("What public profiles, organizations, PGP keys, and biographical records match this person name?",
+         frozenset({"public.person", "public.account", "public.profile"})),
+    ],
     "company-contacts": [
         ("Which business emails and phone numbers does the company publish?",
          frozenset({"company.business_email", "company.business_phone"})),

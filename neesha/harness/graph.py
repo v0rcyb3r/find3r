@@ -81,6 +81,11 @@ def build_graph(company: str, facts: list[dict], subject_kind: str = "company") 
             elif attr in ('whois.org', 'host.org'):
                 org_node = node('organization', value.lower(), value)
                 link(seed, org_node, 'registered_to', fact)
+            elif attr == 'public.account.found' or attr.startswith('public.account.found'):
+                account = node('account', str(fact.get('source', '')) + ':' + value, value)
+                link(seed, account, 'account_observed', fact)
+            elif attr.startswith('public.account.summary'):
+                continue
             elif attr.endswith('.url') or attr.endswith('_url'):
                 url_node = node('url', value, value)
                 link(seed, url_node, 'observed_url', fact)

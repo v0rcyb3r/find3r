@@ -27,7 +27,7 @@ class MaigretAdapter(AccountEnumAdapter):
         subject = normalize_subject("username", reference.label)
         with self._temp_cwd() as cwd:
             args = [self.binary(), "--no-color", "--no-recursion", "--no-extracting",
-                    "--timeout", "10", "--folderoutput", str(cwd), subject]
+                    "--top-sites", "50", "--timeout", "5", "--folderoutput", str(cwd), subject]
             output = self._run(args, cwd)
         return self._sanitized(
             subject,

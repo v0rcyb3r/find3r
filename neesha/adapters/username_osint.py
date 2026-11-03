@@ -53,7 +53,16 @@ def _check_github(u: str, timeout: float) -> Optional[dict[str, str]]:
     if status == 200 and isinstance(data, dict) and data.get("login"):
         login = str(data["login"])
         url = str(data.get("html_url") or f"https://github.com/{login}")
-        return {"service": "github.com", "url": url, "handle": login}
+        return {
+            "service": "github.com",
+            "url": url,
+            "handle": login,
+            "name": str(data.get("name") or ""),
+            "bio": str(data.get("bio") or ""),
+            "company": str(data.get("company") or ""),
+            "location": str(data.get("location") or ""),
+            "blog": str(data.get("blog") or ""),
+        }
     return None
 
 
@@ -63,7 +72,12 @@ def _check_gitlab(u: str, timeout: float) -> Optional[dict[str, str]]:
     if status == 200 and isinstance(data, list) and data and isinstance(data[0], dict):
         uname = str(data[0].get("username") or u)
         url = str(data[0].get("web_url") or f"https://gitlab.com/{uname}")
-        return {"service": "gitlab.com", "url": url, "handle": uname}
+        return {
+            "service": "gitlab.com",
+            "url": url,
+            "handle": uname,
+            "name": str(data[0].get("name") or ""),
+        }
     return None
 
 
@@ -97,9 +111,17 @@ def _check_keybase(u: str, timeout: float) -> Optional[dict[str, str]]:
         them = data.get("them")
         if isinstance(them, list) and them and isinstance(them[0], dict):
             basics = them[0].get("basics") or {}
+            profile = them[0].get("profile") or {}
             if isinstance(basics, dict) and basics.get("username"):
                 uname = str(basics["username"])
-                return {"service": "keybase.io", "url": f"https://keybase.io/{uname}", "handle": uname}
+                return {
+                    "service": "keybase.io",
+                    "url": f"https://keybase.io/{uname}",
+                    "handle": uname,
+                    "name": str(profile.get("full_name") or "") if isinstance(profile, dict) else "",
+                    "bio": str(profile.get("bio") or "") if isinstance(profile, dict) else "",
+                    "location": str(profile.get("location") or "") if isinstance(profile, dict) else "",
+                }
     return None
 
 
@@ -109,7 +131,7 @@ def _check_chess(u: str, timeout: float) -> Optional[dict[str, str]]:
     if status == 200 and isinstance(data, dict) and data.get("username"):
         uname = str(data["username"])
         url = str(data.get("url") or f"https://www.chess.com/member/{uname}")
-        return {"service": "chess.com", "url": url, "handle": uname}
+        return {"service": "chess.com", "url": url, "handle": uname, "name": str(data.get("name") or "")}
     return None
 
 
@@ -132,7 +154,14 @@ def _check_devto(u: str, timeout: float) -> Optional[dict[str, str]]:
     status, data = _http_json(f"https://dev.to/api/users/by_username?url={q}", timeout=timeout)
     if status == 200 and isinstance(data, dict) and data.get("username"):
         uname = str(data["username"])
-        return {"service": "dev.to", "url": f"https://dev.to/{uname}", "handle": uname}
+        return {
+            "service": "dev.to",
+            "url": f"https://dev.to/{uname}",
+            "handle": uname,
+            "name": str(data.get("name") or ""),
+            "bio": str(data.get("summary") or ""),
+            "location": str(data.get("location") or ""),
+        }
     return None
 
 
@@ -142,6 +171,45 @@ def _check_crates(u: str, timeout: float) -> Optional[dict[str, str]]:
     if status == 200 and isinstance(data, dict) and isinstance(data.get("user"), dict):
         login = str(data["user"].get("login") or u)
         return {"service": "crates.io", "url": f"https://crates.io/users/{login}", "handle": login}
+    return None
+
+
+def _check_lichess(u: str, timeout: float) -> Optional[dict[str, str]]:
+    q = urllib.parse.quote(u, safe="")
+    status, data = _http_json(f"https://lichess.org/api/user/{q}", timeout=timeout)
+    if status == 200 and isinstance(data, dict) and data.get("id") and not data.get("disabled"):
+        uname = str(data.get("username") or u)
+        return {"service": "lichess.org", "url": f"https://lichess.org/@/{uname}", "handle": uname}
+    return None
+
+
+def _check_dockerhub(u: str, timeout: float) -> Optional[dict[str, str]]:
+    q = urllib.parse.quote(u.lower(), safe="")
+    status, data = _http_json(f"https://hub.docker.com/v2/users/{q}/", timeout=timeout)
+    if status == 200 and isinstance(data, dict) and data.get("username"):
+        uname = str(data["username"])
+        return {
+            "service": "hub.docker.com",
+            "url": f"https://hub.docker.com/u/{uname}",
+            "handle": uname,
+            "name": str(data.get("full_name") or ""),
+            "company": str(data.get("company") or ""),
+            "location": str(data.get("location") or ""),
+        }
+    return None
+
+
+def _check_mastodon(u: str, timeout: float) -> Optional[dict[str, str]]:
+    q = urllib.parse.quote(u, safe="")
+    status, data = _http_json(f"https://mastodon.social/api/v1/accounts/lookup?acct={q}", timeout=timeout)
+    if status == 200 and isinstance(data, dict) and data.get("username"):
+        uname = str(data["username"])
+        return {
+            "service": "mastodon.social",
+            "url": str(data.get("url") or f"https://mastodon.social/@{uname}"),
+            "handle": uname,
+            "name": str(data.get("display_name") or ""),
+        }
     return None
 
 
@@ -155,6 +223,9 @@ PLATFORM_CHECKS: tuple[tuple[str, Callable[[str, float], Optional[dict[str, str]
     ("duolingo.com", _check_duolingo),
     ("dev.to", _check_devto),
     ("crates.io", _check_crates),
+    ("lichess.org", _check_lichess),
+    ("hub.docker.com", _check_dockerhub),
+    ("mastodon.social", _check_mastodon),
 )
 
 
@@ -163,14 +234,14 @@ class UsernameOsintAdapter(BaseAdapter):
 
     name: ClassVar[str] = "username-osint"
     tier: ClassVar[str] = "A"
-    default_enabled: ClassVar[bool] = False
+    default_enabled: ClassVar[bool] = True
     collection_mode: ClassVar[str] = "third_party_passive"
     source_type: ClassVar[str] = "osint"
     description: ClassVar[str] = (
         "Keyless username OSINT across GitHub, GitLab, Reddit, HackerNews, Keybase, "
-        "Chess.com, Duolingo, DEV Community, and Crates.io"
+        "Chess.com, Duolingo, DEV Community, Crates.io, Lichess, DockerHub, and Mastodon"
     )
-    produces: ClassVar[frozenset[str]] = frozenset({"public.account"})
+    produces: ClassVar[frozenset[str]] = frozenset({"public.account", "public.profile"})
     accepts: ClassVar[frozenset[str]] = frozenset({"username"})
     retention_days: ClassVar[int] = 14
     timeout: ClassVar[float] = DEFAULT_TIMEOUT
@@ -254,5 +325,15 @@ class UsernameOsintAdapter(BaseAdapter):
                 add("public.account.found", svc)
             if url:
                 add("public.account.url", url)
+            if m.get("name"):
+                add("public.profile.name", f"{m['name']} ({svc})")
+            if m.get("bio"):
+                add("public.profile.bio", f"{m['bio']} ({svc})")
+            if m.get("company"):
+                add("public.profile.company", f"{m['company']} ({svc})")
+            if m.get("location"):
+                add("public.profile.location", f"{m['location']} ({svc})")
+            if m.get("blog") and str(m["blog"]).startswith(("http://", "https://")):
+                add("public.profile.website", str(m["blog"]))
 
         return facts

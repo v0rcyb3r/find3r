@@ -718,6 +718,82 @@ def test_stix_html_dossier_diff_and_operations_engine(workspace, client, monkeyp
     assert any(o['callsign'] == 'partner-02' for o in op_data['operators'])
 
 
+def test_phone_person_and_smart_seed_disambiguation_in_workspace(workspace, monkeypatch):
+    from neesha.adapters import registry
+    from neesha.adapters.base import RawResult
+    from neesha.harness.gate import EngagementView
+
+    # Smart seed disambiguation in auto mode
+    assert Workspace._smart_resolve_seed('@torvalds', 'auto')['kind'] == 'username'
+    assert Workspace._smart_resolve_seed('@torvalds', 'auto')['normalized'] == 'torvalds'
+    assert Workspace._smart_resolve_seed('torvalds', 'auto')['kind'] == 'username'
+    assert Workspace._smart_resolve_seed('Linus Torvalds', 'auto')['kind'] == 'person'
+    assert Workspace._smart_resolve_seed('Acme Corp', 'auto')['kind'] == 'company'
+
+    # Phone OSINT run
+    workspace.sources = {'phone-osint'}
+    monkeypatch.setattr(registry.get('phone-osint'), '_search_public_mentions', lambda self, p: [])
+    now = datetime.now(timezone.utc)
+    phone_eng = EngagementView(
+        'phone-eng', 'public_research',
+        authorized_domains=('+14155552671',),
+        starts_at=now - timedelta(days=1),
+        expires_at=now + timedelta(days=1),
+    )
+    workspace._run('+14155552671', phone_eng, False, False, 'phone')
+    assert workspace.job['state'] == 'complete'
+    phone_brief = workspace.brief(workspace.job['run_id'])
+    assert phone_brief['subject_kind'] == 'phone'
+    phone_attrs = {f['attribute']: f['value'] for f in phone_brief['facts']}
+    assert phone_attrs.get('public.phone.e164') == '+14155552671'
+    assert 'San Francisco' in phone_attrs.get('public.phone.region', '')
+
+    # Person OSINT run
+    workspace.sources = {'person-osint'}
+    person_payload = {
+        'subject': 'Linus Torvalds',
+        'github': [{
+            'platform': 'github.com',
+            'handle': 'torvalds',
+            'name': 'Linus Torvalds',
+            'url': 'https://github.com/torvalds',
+            'company': 'Linux Foundation',
+            'location': 'Portland, OR',
+            'bio': 'Creator of Linux and Git',
+            'followers': 200000,
+            'public_repos': 8,
+        }],
+        'gitlab': [],
+        'wikipedia': {
+            'title': 'Linus Torvalds',
+            'description': 'Finnish-American software engineer',
+            'extract': 'Linus Benedict Torvalds is a Finnish-American software engineer.',
+            'url': 'https://en.wikipedia.org/wiki/Linus_Torvalds',
+        },
+        'openpgp': [],
+    }
+    monkeypatch.setattr(
+        registry.get('person-osint'),
+        'fetch',
+        lambda self, ref: RawResult(json.dumps(person_payload).encode(), ref.url, ref.origin_url, http_status=200),
+    )
+    person_eng = EngagementView(
+        'person-eng', 'public_research',
+        authorized_domains=('Linus Torvalds',),
+        starts_at=now - timedelta(days=1),
+        expires_at=now + timedelta(days=1),
+    )
+    workspace._run('Linus Torvalds', person_eng, False, False, 'person')
+    assert workspace.job['state'] == 'complete'
+    person_brief = workspace.brief(workspace.job['run_id'])
+    assert person_brief['subject_kind'] == 'person'
+    person_attrs = {f['attribute']: f['value'] for f in person_brief['facts']}
+    assert person_attrs.get('public.person.full_name') == 'Linus Torvalds'
+    assert person_attrs.get('public.person.organization') == 'Linux Foundation'
+    assert person_attrs.get('public.person.summary', '').startswith('Linus Benedict Torvalds')
+
+
+
 
 
 

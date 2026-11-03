@@ -239,6 +239,50 @@ class EmailOsintAdapter(BaseAdapter):
             return {"service": "gitlab.com", "checked": True, "found": False}
         return {"service": "gitlab.com", "checked": False, "found": False}
 
+    def _probe_github_user_search(self, email: str) -> dict[str, Any]:
+        q = urllib.parse.quote(f"{email} in:email", safe="")
+        status, data = self._http_json(
+            f"https://api.github.com/search/users?q={q}&per_page=3",
+            headers={"Accept": "application/vnd.github+json"},
+        )
+        if status == 200 and isinstance(data, dict) and isinstance(data.get("items"), list):
+            items = data["items"]
+            if items and isinstance(items[0], dict):
+                u = items[0]
+                return {
+                    "service": "github.com",
+                    "checked": True,
+                    "found": True,
+                    "url": u.get("html_url") or f"https://github.com/{u.get('login', '')}",
+                    "username": u.get("login"),
+                }
+            return {"service": "github.com", "checked": True, "found": False}
+        return {"service": "github.com", "checked": False, "found": False}
+
+    def _probe_xposedornot(self, email: str) -> dict[str, Any]:
+        q = urllib.parse.quote(email, safe="")
+        status, data = self._http_json(f"https://api.xposedornot.com/v1/check-email/{q}")
+        if status == 200 and isinstance(data, dict):
+            raw_breaches = data.get("breaches")
+            breaches: list[str] = []
+            if isinstance(raw_breaches, list):
+                for entry in raw_breaches:
+                    if isinstance(entry, list):
+                        breaches.extend(str(b) for b in entry if b)
+                    elif isinstance(entry, str) and entry:
+                        breaches.append(entry)
+            if breaches:
+                return {
+                    "service": "xposedornot.com",
+                    "checked": True,
+                    "found": True,
+                    "breaches": breaches[:25],
+                }
+            return {"service": "xposedornot.com", "checked": True, "found": False}
+        if status == 404:
+            return {"service": "xposedornot.com", "checked": True, "found": False}
+        return {"service": "xposedornot.com", "checked": False, "found": False}
+
     def _probe_handle(self, handle: str) -> list[dict[str, str]]:
         """Check whether the email's local-part handle exists on public developer/social platforms."""
         if len(handle) < 4 or handle.lower() in ROLE_LOCAL_PARTS or not re.fullmatch(r"[a-zA-Z0-9._-]{4,39}", handle):
@@ -276,7 +320,7 @@ class EmailOsintAdapter(BaseAdapter):
         local_part, domain = email.rsplit("@", 1)
         base_local = local_part.split("+", 1)[0]
 
-        with ThreadPoolExecutor(max_workers=8) as pool:
+        with ThreadPoolExecutor(max_workers=10) as pool:
             f_dns = pool.submit(self._check_dns, domain)
             f_ff = pool.submit(self._probe_firefox, email)
             f_wp = pool.submit(self._probe_wordpress, email)
@@ -285,6 +329,8 @@ class EmailOsintAdapter(BaseAdapter):
             f_grav = pool.submit(self._probe_gravatar_md5, email)
             f_pgp = pool.submit(self._probe_openpgp, email)
             f_gl = pool.submit(self._probe_gitlab_email, email)
+            f_gh = pool.submit(self._probe_github_user_search, email)
+            f_xon = pool.submit(self._probe_xposedornot, email)
             f_handle = pool.submit(self._probe_handle, base_local)
 
             dns_info = f_dns.result()
@@ -296,6 +342,8 @@ class EmailOsintAdapter(BaseAdapter):
                 f_grav.result(),
                 f_pgp.result(),
                 f_gl.result(),
+                f_gh.result(),
+                f_xon.result(),
             ]
             handle_matches = f_handle.result()
 
@@ -391,6 +439,8 @@ class EmailOsintAdapter(BaseAdapter):
                     add("public.profile.gravatar.bio", p["about"])
                 if p.get("key_id"):
                     add("public.email.pgp_key", p["key_id"])
+                for breach_name in p.get("breaches") or []:
+                    add("public.email.breach_exposure", str(breach_name))
                 for acct_url in p.get("accounts") or []:
                     add("public.account.url", acct_url)
 

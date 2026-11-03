@@ -102,17 +102,52 @@ class InternetDbAdapter(BaseAdapter):
         except Exception:
             return {}
 
+    def _fetch_free_geo_json(self, ip: str) -> dict:
+        try:
+            ip_obj = ipaddress.ip_address(ip.strip())
+            if not ip_obj.is_global:
+                return {}
+            clean_ip = ip_obj.compressed
+        except ValueError:
+            return {}
+        url = f"https://ipwho.is/{urllib.parse.quote(clean_ip, safe='')}"
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "Find3r/0.2", "Accept": "application/json"},
+        )
+        try:
+            with _https_opener().open(req, timeout=5) as resp:
+                raw = resp.read(65536)
+                data = json.loads(raw)
+                if not isinstance(data, dict) or data.get("success") is False:
+                    return {}
+                conn = data.get("connection") if isinstance(data.get("connection"), dict) else {}
+                asn_val = conn.get("asn")
+                return {
+                    "country_code": data.get("country_code"),
+                    "city": data.get("city"),
+                    "latitude": data.get("latitude"),
+                    "longitude": data.get("longitude"),
+                    "asn": f"AS{asn_val}" if asn_val else None,
+                    "org": conn.get("org"),
+                    "isp": conn.get("isp"),
+                }
+        except Exception:
+            return {}
+
     def _merge_shodan_enrichment(self, ip: str, base_data: dict) -> dict:
         shodan_data = self._fetch_shodan_host_json(ip)
-        if not shodan_data:
+        free_geo = self._fetch_free_geo_json(ip) if not shodan_data else {}
+        source_meta = shodan_data or free_geo
+        if not source_meta:
             return base_data
         merged = dict(base_data)
         merged.setdefault("ip", ip)
         for key in ("country_code", "city", "latitude", "longitude", "asn", "org", "isp"):
-            if shodan_data.get(key) is not None and merged.get(key) is None:
-                merged[key] = shodan_data[key]
+            if source_meta.get(key) is not None and merged.get(key) is None:
+                merged[key] = source_meta[key]
         for list_key in ("ports", "hostnames", "tags", "vulns"):
-            s_val = shodan_data.get(list_key)
+            s_val = source_meta.get(list_key)
             if isinstance(s_val, list):
                 existing = list(merged.get(list_key) or [])
                 for item in s_val:
@@ -149,26 +184,23 @@ class InternetDbAdapter(BaseAdapter):
         domain = (reference.params or {}).get("domain")
         if domain:
             ips: list[str] = []
-            try:
-                infos = socket.getaddrinfo(domain, None, socket.AF_INET, socket.SOCK_STREAM)
-                for info in infos:
-                    addr = info[4][0]
-                    ip_obj = ipaddress.ip_address(addr)
-                    if ip_obj.is_global and addr not in ips:
-                        ips.append(addr)
-                    if len(ips) >= 3:
-                        break
-            except Exception as exc:
-                raise AdapterError(f"Could not resolve IPv4 for {domain}") from exc
+            candidate_hosts = (domain, f"www.{domain}", f"api.{domain}", f"mail.{domain}")
+            for host in candidate_hosts:
+                try:
+                    infos = socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_STREAM)
+                    for info in infos:
+                        addr = info[4][0]
+                        ip_obj = ipaddress.ip_address(addr)
+                        if ip_obj.is_global and addr not in ips:
+                            ips.append(addr)
+                        if len(ips) >= 4:
+                            break
+                except Exception:
+                    continue
+                if len(ips) >= 4:
+                    break
             if not ips:
-                return RawResult(
-                    payload=b"{}",
-                    request_url=reference.url,
-                    origin_url=reference.origin_url,
-                    http_status=404,
-                    content_type="application/json",
-                    collected_at=datetime.now(timezone.utc),
-                )
+                raise AdapterError(f"Could not resolve IPv4 for {domain}")
             results = {}
             for ip in ips:
                 data = self._fetch_ip_json(ip)

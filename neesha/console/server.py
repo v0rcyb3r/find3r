@@ -4,9 +4,12 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import re
 import secrets
 import threading
 import time
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -486,8 +489,77 @@ class Workspace:
                 self.job = {'state': 'idle'}
             return result
 
+    _CORP_SUFFIXES = frozenset({
+        'inc', 'inc.', 'llc', 'l.l.c.', 'ltd', 'ltd.', 'corp', 'corp.', 'corporation',
+        'company', 'co', 'co.', 'plc', 'gmbh', 'ag', 'sa', 's.a.', 'bv', 'b.v.',
+        'technologies', 'technology', 'systems', 'security', 'labs', 'group',
+        'holdings', 'enterprises', 'solutions', 'ventures', 'partners', 'networks',
+    })
+
+    @classmethod
+    def _resolve_company_domain(cls, company_name: str) -> str:
+        """Resolve a free-text company name to its primary domain via Clearbit Autocomplete or slug fallback."""
+        cleaned = (company_name or '').strip()
+        if '.' in cleaned and ' ' not in cleaned:
+            try:
+                return canonical_domain(cleaned)
+            except ValueError:
+                pass
+        try:
+            q = urllib.parse.quote(cleaned)
+            req = urllib.request.Request(
+                f'https://autocomplete.clearbit.com/v1/companies/suggest?query={q}',
+                headers={'User-Agent': 'Mozilla/5.0 NEESHA-OSINT/0.2', 'Accept': 'application/json'},
+            )
+            with urllib.request.urlopen(req, timeout=4) as resp:
+                if resp.status == 200:
+                    suggestions = json.loads(resp.read(65536).decode('utf-8', errors='replace'))
+                    if isinstance(suggestions, list):
+                        for item in suggestions:
+                            if isinstance(item, dict) and item.get('domain'):
+                                try:
+                                    return canonical_domain(str(item['domain']))
+                                except ValueError:
+                                    continue
+        except Exception:
+            pass
+        tokens = [
+            re.sub(r'[^a-z0-9-]', '', tok.lower())
+            for tok in cleaned.split()
+            if tok.lower().rstrip(',.') not in cls._CORP_SUFFIXES
+        ]
+        tokens = [t for t in tokens if t]
+        slug = ''.join(tokens) if tokens else re.sub(r'[^a-z0-9-]', '', cleaned.lower())
+        if slug:
+            try:
+                return canonical_domain(f'{slug}.com')
+            except ValueError:
+                pass
+        raise ValueError(f'Could not resolve company name "{company_name}" to a valid domain.')
+
+    @classmethod
+    def _smart_resolve_seed(cls, raw_value: str, raw_kind: str = 'auto') -> dict:
+        """Resolve a user-supplied target seed, auto-disambiguating handles, person names, and companies when kind=='auto'."""
+        text = (raw_value or '').strip()
+        kind = (raw_kind or 'auto').strip().lower()
+        if text.startswith('@') and len(text) > 1 and ' ' not in text and kind in ('auto', 'username', 'name'):
+            return resolve_seed(text[1:], 'username')
+        seed = resolve_seed(text, kind)
+        if seed['requires_resolution'] and kind == 'auto' and seed['kind'] == 'name':
+            norm = seed['normalized']
+            words = norm.split()
+            if len(words) == 1 and re.fullmatch(r'[A-Za-z0-9._-]{2,64}', norm):
+                return resolve_seed(norm, 'username')
+            if any(w.lower().rstrip(',.') in cls._CORP_SUFFIXES for w in words):
+                return resolve_seed(norm, 'company')
+            if len(words) >= 2:
+                return resolve_seed(norm, 'person')
+        return seed
+
     def launch(self, payload):
-        seed = resolve_seed(payload.get('seed', payload.get('domain', '')), payload.get('kind', 'auto'))
+        raw_input = payload.get('seed', payload.get('domain', ''))
+        raw_kind = payload.get('kind', 'auto')
+        seed = self._smart_resolve_seed(raw_input, raw_kind)
         seed_kind = seed['kind']
         if seed['requires_resolution']:
             raise ValueError(seed['reason'])
@@ -496,7 +568,10 @@ class Workspace:
                 raise ValueError(seed['reason'])
             domain = canonical_domain(seed['domain'])
             subject_kind = 'domain'
-        elif seed_kind in ('email', 'username', 'ip', 'phone', 'company', 'person'):
+        elif seed_kind == 'company':
+            domain = self._resolve_company_domain(seed['normalized'])
+            subject_kind = 'domain'
+        elif seed_kind in ('email', 'username', 'ip', 'phone', 'person'):
             domain = seed['normalized']
             subject_kind = seed_kind
         else:
@@ -514,12 +589,12 @@ class Workspace:
         operator = str(payload.get('operator') or 'local-analyst').strip()[:48] or 'local-analyst'
         now = datetime.now(timezone.utc)
         engagement_id = uuid4().hex
-        is_personal_kind = subject_kind in ('email', 'username')
-        techniques = frozenset({'account_enumeration'}) if is_personal_kind else frozenset()
+        is_personal_kind = subject_kind in ('email', 'username', 'phone', 'person')
+        techniques = frozenset({'account_enumeration'}) if subject_kind in ('email', 'username') else frozenset()
         engagement = EngagementView(
             id=engagement_id,
             authority_basis='public_research' if is_personal_kind else 'prospect_company',
-            authorized_domains=() if is_personal_kind else (domain,),
+            authorized_domains=() if subject_kind in ('email', 'username') else (domain,),
             authorized_emails=(domain,) if subject_kind == 'email' else (),
             authorized_usernames=(domain,) if subject_kind == 'username' else (),
             permitted_techniques=techniques,
@@ -586,7 +661,7 @@ class Workspace:
         skipped_seeds = []
         for t in targets:
             try:
-                s = resolve_seed(t, 'auto')
+                s = self._smart_resolve_seed(t, 'auto')
                 if s['requires_resolution']:
                     skipped_seeds.append({'target': t, 'reason': s['reason']})
                 else:
@@ -690,6 +765,10 @@ class Workspace:
                     pir_templates = ('username-account-presence',)
                 elif subject_kind == 'ip':
                     pir_templates = ('ip-infrastructure', 'whois-registration')
+                elif subject_kind == 'phone':
+                    pir_templates = ('phone-public-presence',)
+                elif subject_kind == 'person':
+                    pir_templates = ('person-public-presence',)
                 else:
                     pir_templates = (
                         'attack-surface', 'company-contacts', 'email-posture', 'public-history',

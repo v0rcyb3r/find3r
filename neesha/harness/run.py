@@ -102,13 +102,15 @@ def execute_run(
         'email': 'email-public-presence',
         'username': 'username-account-presence',
         'ip': 'ip-infrastructure',
+        'phone': 'phone-public-presence',
+        'person': 'person-public-presence',
     }
     if subject_kind in _DEFAULT_PIR and tuple(pir_templates) == ('attack-surface',):
         pir_templates = (_DEFAULT_PIR[subject_kind],)
     pirs = expand_templates(pir_templates)
     if subject_kind not in ('domain', 'company', 'email', 'username', 'ip', 'phone', 'person'):
         raise ValueError(f'Unsupported subject_kind: {subject_kind}')
-    if subject_kind in ('email', 'username', 'ip', 'phone'):
+    if subject_kind in ('email', 'username', 'ip', 'phone', 'person'):
         from neesha.resolve.intake import resolve_seed
         company = resolve_seed(company, subject_kind)['normalized']
     plan = build_plan(pirs, company, entity_kind=subject_kind, tiers=tiers, sources=sources)
@@ -200,7 +202,7 @@ def execute_run(
                             "last_outcome": res.outcome,
                         })
 
-            with ThreadPoolExecutor(max_workers=min(6, len(plan.steps))) as pool:
+            with ThreadPoolExecutor(max_workers=min(12, len(plan.steps))) as pool:
                 futures = [pool.submit(_run_step, i, st) for i, st in enumerate(plan.steps)]
                 for fut in as_completed(futures):
                     fut.result()

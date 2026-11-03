@@ -35,6 +35,8 @@ from neesha.adapters.hackertarget import HackerTargetAdapter
 from neesha.adapters.amass import AmassAdapter
 from neesha.adapters.email_osint import EmailOsintAdapter
 from neesha.adapters.username_osint import UsernameOsintAdapter
+from neesha.adapters.phone_osint import PhoneOsintAdapter
+from neesha.adapters.person_osint import PersonOsintAdapter
 from neesha.adapters.theharvester import TheHarvesterAdapter
 from neesha.adapters.ripestat import RipestatAdapter
 from neesha.adapters.wellknown import SecurityTxtAdapter
@@ -62,6 +64,8 @@ _REGISTERED: tuple[Type[BaseAdapter], ...] = (
     EmailRepAdapter,
     EmailOsintAdapter,
     UsernameOsintAdapter,
+    PhoneOsintAdapter,
+    PersonOsintAdapter,
     HoleheAdapter,
     SocialscanAdapter,
     SherlockAdapter,
