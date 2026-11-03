@@ -52,7 +52,7 @@ INFRA_ATTRIBUTES = frozenset({
     'http.security_header.referrer-policy',
     'http.security_header.permissions-policy',
     'host.port', 'host.cpe', 'host.reverse_dns', 'host.tag', 'host.vuln',
-    'host.asn', 'host.asn_name', 'host.org', 'host.network_name', 'host.cidr', 'host.country',
+    'host.asn', 'host.asn_name', 'host.org', 'host.isp', 'host.network_name', 'host.cidr', 'host.country', 'host.city', 'host.latitude', 'host.longitude',
     'tech.server', 'tech.cdn', 'tech.framework', 'tech.cms', 'tech.analytics',
     'web.title', 'web.description',
     'whois.registrar', 'whois.registered', 'whois.created', 'whois.updated', 'whois.expires',
@@ -263,6 +263,13 @@ def analyze_brief(
                 raise RuntimeAnalysisError(f'Runtime provider {name} needs an explicit model and API key.') from None
             cap_env = f'NEESHA_{name.upper()}_CALL_CAP_USD'
             prices[name] = _money(os.environ.get(cap_env, ''), cap_env)
+
+    canonical_keys = [
+        f'ollama:{ollama_models[n]}' if n in ollama_models else n
+        for n in names
+    ]
+    if len(set(canonical_keys)) != len(names):
+        raise RuntimeAnalysisError('Single mode needs one provider; multi mode needs two or three distinct providers.')
 
     facts, omitted = _safe_facts(brief)
     result = {

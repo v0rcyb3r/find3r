@@ -13,6 +13,7 @@ from neesha.cli.harness_cli import (
     budget_app,
     engagement_app,
     harness_app,
+    harness_maltego_transform,
     harness_purge,
     harness_run,
     harness_serve,
@@ -34,6 +35,7 @@ app.add_typer(cloud_app, name="cloud")
 app.command("run")(harness_run)
 app.command("serve")(harness_serve)
 app.command("purge")(harness_purge)
+app.command("maltego-transform")(harness_maltego_transform)
 
 
 @app.command()

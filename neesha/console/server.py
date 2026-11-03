@@ -30,6 +30,7 @@ STATIC = Path(__file__).parent / 'static'
 
 ALLOWED_SETTING_KEYS = (
     'VULTR_API_KEY',
+    'SHODAN_API_KEY',
     'HUNTER_API_KEY',
     'EMAILREP_API_KEY',
     'INTELX_API_KEY',
@@ -262,10 +263,17 @@ class Workspace:
                         saved_keys.pop(k, None)
 
             if isinstance(payload.get('models'), dict):
+                from neesha.runtime.ollama import valid_ollama_model
+                from neesha.runtime.providers import MODEL_ID
                 for p, m in payload['models'].items():
                     if p in DEFAULT_MODELS and isinstance(m, str) and m.strip():
-                        os.environ[f'NEESHA_{p.upper()}_MODEL'] = m.strip()
-                        saved_models[p] = m.strip()
+                        cleaned_m = m.strip()
+                        if p == 'ollama':
+                            cleaned_m = valid_ollama_model(cleaned_m)
+                        elif not MODEL_ID.fullmatch(cleaned_m):
+                            raise ValueError(f'Invalid model identifier for {p}.')
+                        os.environ[f'NEESHA_{p.upper()}_MODEL'] = cleaned_m
+                        saved_models[p] = cleaned_m
 
             if isinstance(payload.get('call_caps'), dict):
                 for p, c in payload['call_caps'].items():
@@ -553,7 +561,7 @@ def make_handler(workspace: Workspace):
             self.send_header('Cache-Control', 'no-store')
             self.send_header('X-Content-Type-Options', 'nosniff')
             self.send_header('Referrer-Policy', 'no-referrer')
-            self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+            self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
             self.end_headers()
             self.wfile.write(data)
 
@@ -589,7 +597,22 @@ def make_handler(workspace: Workspace):
                 filename, content_type, script_body = generate_preinstall_script(target_os)
                 return self._send(200, {'filename': filename, 'content_type': content_type, 'script': script_body})
             if path.startswith('/api/runs/'):
-                run_id = path.removeprefix('/api/runs/')
+                tail = path.removeprefix('/api/runs/')
+                if tail.endswith('/maltego.graphml') or tail.endswith('/maltego.csv'):
+                    from neesha.harness.mapping import build_maltego_csv, build_maltego_graphml
+                    run_id, fmt = tail.split('/', 1)
+                    if len(run_id) != 32 or any(c not in '0123456789abcdef' for c in run_id):
+                        return self._send(404, {'error': 'Run not found.'})
+                    try:
+                        b = workspace.brief(run_id)
+                        if fmt == 'maltego.graphml':
+                            return self._send(200, {'filename': f'find3r-{run_id}-maltego.graphml', 'content_type': 'application/graphml+xml; charset=utf-8', 'content': build_maltego_graphml(b)})
+                        return self._send(200, {'filename': f'find3r-{run_id}-maltego.csv', 'content_type': 'text/csv; charset=utf-8', 'content': build_maltego_csv(b)})
+                    except sa.exc.NoResultFound:
+                        return self._send(404, {'error': 'Run not found.'})
+                    except ValueError as exc:
+                        return self._send(400, {'error': str(exc)})
+                run_id = tail
                 if len(run_id) != 32 or any(c not in '0123456789abcdef' for c in run_id):
                     return self._send(404, {'error': 'Run not found.'})
                 try:

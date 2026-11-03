@@ -81,6 +81,12 @@ INSTALLABLE_TOOLS: dict[str, dict[str, str]] = {
         "package": "bbot",
         "description": "Recursive OSINT & recon scanner (BBOT)",
     },
+    "shodan": {
+        "binary": "shodan",
+        "method": "pip",
+        "package": "shodan",
+        "description": "Shodan CLI & Python library for Geo-IP, ports, banners, and CVEs",
+    },
     "ollama": {
         "binary": "ollama",
         "method": "ollama",
@@ -170,12 +176,22 @@ def find_tool_binary(binary_name: str) -> str | None:
     return shutil.which(binary_name)
 
 
-def _run_install_cmd(args: list[str], timeout: int = 180) -> tuple[bool, str]:
+def _safe_subprocess_env() -> dict[str, str]:
+    """Return a copy of os.environ with API keys, tokens, and secrets stripped."""
     ensure_tool_paths_in_env()
+    return {
+        k: v
+        for k, v in os.environ.items()
+        if not k.upper().endswith(("_API_KEY", "_SECRET", "_TOKEN", "_PASSWORD"))
+    }
+
+
+def _run_install_cmd(args: list[str], timeout: int = 180) -> tuple[bool, str]:
     try:
         proc = subprocess.run(
             args,
             cwd=str(PROJECT_ROOT),
+            env=_safe_subprocess_env(),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -400,8 +416,8 @@ $Py  = ".\\.venv\\Scripts\\python.exe"
 if (Test-Path "pyproject.toml") {
     & $Pip install -e .
 }
-Write-Host "Installing Python OSINT CLI tools (holehe, socialscan, maigret, sherlock-project, theHarvester, bbot)..." -ForegroundColor Cyan
-& $Pip install --upgrade holehe socialscan maigret sherlock-project theHarvester bbot
+Write-Host "Installing Python OSINT CLI tools (holehe, socialscan, maigret, sherlock-project, theHarvester, bbot, shodan)..." -ForegroundColor Cyan
+& $Pip install --upgrade holehe socialscan maigret sherlock-project theHarvester bbot shodan
 
 Write-Host "Downloading Subfinder & Amass Windows binaries into .venv\\Scripts..." -ForegroundColor Cyan
 & $Py -c "from neesha.adapters.tool_installer import install_tool; print(install_tool('all'))"
@@ -442,8 +458,8 @@ if [ -f "pyproject.toml" ]; then
   .venv/bin/pip install -e .
 fi
 
-echo "[3/4] Installing Python OSINT CLI tools (holehe, socialscan, maigret, sherlock-project, theHarvester, bbot)..."
-.venv/bin/pip install --upgrade holehe socialscan maigret sherlock-project theHarvester bbot
+echo "[3/4] Installing Python OSINT CLI tools (holehe, socialscan, maigret, sherlock-project, theHarvester, bbot, shodan)..."
+.venv/bin/pip install --upgrade holehe socialscan maigret sherlock-project theHarvester bbot shodan
 .venv/bin/python -c "from neesha.adapters.tool_installer import install_tool; install_tool('all')" || true
 
 if command -v ollama >/dev/null 2>&1; then
@@ -489,8 +505,8 @@ if [ -f "pyproject.toml" ]; then
   .venv/bin/pip install -e .
 fi
 
-echo "[4/5] Installing Python OSINT CLI packages (holehe, socialscan, maigret, sherlock-project, theHarvester, bbot)..."
-.venv/bin/pip install --upgrade holehe socialscan maigret sherlock-project theHarvester bbot
+echo "[4/5] Installing Python OSINT CLI packages (holehe, socialscan, maigret, sherlock-project, theHarvester, bbot, shodan)..."
+.venv/bin/pip install --upgrade holehe socialscan maigret sherlock-project theHarvester bbot shodan
 .venv/bin/python -c "from neesha.adapters.tool_installer import install_tool; install_tool('all')" || true
 
 if command -v ollama >/dev/null 2>&1; then

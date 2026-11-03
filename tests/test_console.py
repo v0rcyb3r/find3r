@@ -431,3 +431,109 @@ def test_local_ollama_and_manually_installed_models(client, workspace, monkeypat
     assert len(res['claims']) == 1
     assert res['claims'][0]['retrieved_by']['model'] == 'hf.co/sec-team/osint-gguf:Q4_K_M'
 
+
+def test_geo_map_shodan_enrichment_and_maltego_exports(client, workspace, monkeypatch):
+    from neesha.adapters.base import RawResult, Request
+    from neesha.adapters.internetdb import InternetDbAdapter
+    from neesha.harness.gate import EngagementView
+    from neesha.harness.mapping import build_geo_map, build_maltego_csv, build_maltego_graphml, build_maltego_transform_xml
+
+    # 1. Verify Shodan + InternetDB Geo-IP extraction
+    adapter = InternetDbAdapter()
+    raw = RawResult(
+        json.dumps({
+            'ip': '104.16.132.229',
+            'ports': [443, 8443],
+            'hostnames': ['edge.example.com'],
+            'vulns': ['CVE-2024-9999'],
+            'country_code': 'DE',
+            'city': 'Frankfurt',
+            'latitude': 50.1109,
+            'longitude': 8.6821,
+            'asn': 'AS13335',
+            'org': 'Cloudflare, Inc.',
+            'isp': 'Cloudflare',
+        }).encode(),
+        'https://internetdb.shodan.io/104.16.132.229',
+        http_status=200,
+    )
+    drafts = adapter.parse(raw, Request('ip', '104.16.132.229'))
+    by_attr = {(d.attribute, d.value) for d in drafts}
+    assert ('host.country', 'DE') in by_attr
+    assert ('host.city', 'Frankfurt') in by_attr
+    assert ('host.latitude', '50.1109') in by_attr
+    assert ('host.longitude', '8.6821') in by_attr
+    assert ('host.asn', 'AS13335') in by_attr
+
+    # 2. Verify build_geo_map plots multiple nodes, arcs, and summaries
+    sample_facts = [
+        {'fact_id': 'f1', 'subject': 'example.com', 'attribute': 'dns.a', 'value': '104.16.132.229'},
+        {'fact_id': 'f2', 'subject': '104.16.132.229', 'attribute': 'host.country', 'value': 'DE'},
+        {'fact_id': 'f3', 'subject': '104.16.132.229', 'attribute': 'host.city', 'value': 'Frankfurt'},
+        {'fact_id': 'f4', 'subject': '104.16.132.229', 'attribute': 'host.latitude', 'value': '50.1109'},
+        {'fact_id': 'f5', 'subject': '104.16.132.229', 'attribute': 'host.longitude', 'value': '8.6821'},
+        {'fact_id': 'f6', 'subject': '104.16.132.229', 'attribute': 'host.port', 'value': '443'},
+        {'fact_id': 'f7', 'subject': '104.16.132.229', 'attribute': 'host.vuln', 'value': 'CVE-2024-9999'},
+        {'fact_id': 'f8', 'subject': 'api.example.com', 'attribute': 'dns.a', 'value': '52.1.2.3'},
+    ]
+    geo = build_geo_map('example.com', sample_facts, 'domain')
+    assert geo['summary']['total_nodes'] == 2
+    assert geo['summary']['vulnerable_nodes_count'] == 1
+    assert len(geo['arcs']) == 1
+    xml_out = build_maltego_transform_xml(sample_facts)
+    assert '<MaltegoTransformResponseMessage>' in xml_out
+    assert 'maltego.IPv4Address' in xml_out
+
+    # 3. Verify brief geo_map and Maltego HTTP export endpoints
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr('neesha.adapters.crtsh.http_get', lambda *a, **kw: json.dumps([
+        {'name_value': 'mail.example.com', 'issuer_name': 'Example CA'}]))
+    workspace._run('example.com', EngagementView('authorized', 'prospect_company',
+        authorized_domains=('example.com',), starts_at=now - timedelta(days=1),
+        expires_at=now + timedelta(days=1)), False)
+    run_id = workspace.job['run_id']
+    request, _ = client
+    st_g, _, body_g = request(f'/api/runs/{run_id}/maltego.graphml')
+    assert st_g == 200
+    g_data = json.loads(body_g)
+    assert 'maltego.DNSName' in g_data['content']
+    st_c, _, body_c = request(f'/api/runs/{run_id}/maltego.csv')
+    assert st_c == 200
+    c_data = json.loads(body_c)
+    assert 'Source Entity Type' in c_data['content']
+
+
+def test_hardening_geo_hints_xml_escape_and_ollama_import(engine, monkeypatch):
+    import pytest
+    from neesha.harness.mapping import _xml_escape, build_geo_map
+    from neesha.runtime.investigation import RuntimeAnalysisError, analyze_brief
+    from neesha.runtime.ollama import create_custom_ollama_model
+
+    # 1. _xml_escape strips XML 1.0 control chars and escapes quotes
+    escaped = _xml_escape('test\x00\x07"quote"\'single\'<&>')
+    assert '\x00' not in escaped and '\x07' not in escaped
+    assert '&quot;quote&quot;' in escaped and '&apos;single&apos;' in escaped
+
+    # 2. KNOWN_NETWORK_HINTS takes precedence over domain whois.country
+    geo = build_geo_map('example.com', [
+        {'fact_id': 'f1', 'subject': 'example.com', 'attribute': 'whois.country', 'value': 'US'},
+        {'fact_id': 'f2', 'subject': 'example.com', 'attribute': 'dns.a', 'value': '1.1.1.1'},
+    ], 'domain')
+    assert geo['points'][0]['country'] == 'AU'
+    assert geo['points'][0]['org'] == 'Cloudflare DNS'
+
+    # 3. create_custom_ollama_model rejects quotes and non-weights files safely
+    monkeypatch.setattr('neesha.runtime.ollama.find_tool_binary', lambda name: '/usr/local/bin/ollama')
+    monkeypatch.setattr('neesha.runtime.ollama.ensure_ollama_running', lambda **kw: True)
+    with pytest.raises(ValueError, match='valid local'):
+        create_custom_ollama_model('bad:latest', '/tmp/evil"quote.gguf')
+    with pytest.raises(ValueError, match='weights file or a Modelfile'):
+        create_custom_ollama_model('bad:latest', '/etc/passwd')
+
+    # 4. Canonical duplicate Ollama provider detection in multi mode
+    monkeypatch.setenv('NEESHA_OLLAMA_MODEL', 'llama3.1:8b')
+    with pytest.raises(RuntimeAnalysisError, match='distinct providers'):
+        analyze_brief(engine, {'facts': []}, 'multi', ['ollama', 'ollama:llama3.1:8b'])
+
+
+

@@ -9,12 +9,12 @@ class Element {
  setAttribute(k,v){this.attrs[k]=String(v);} addEventListener(name,fn){this.listeners[name]=fn;}
  querySelectorAll(selector){let result=[];for(const child of this.children){if(matches(child,selector))result.push(child);result.push(...child.querySelectorAll(selector));}return result;}
  querySelector(selector){return this.querySelectorAll(selector)[0]||null;} remove(){if(this.parent)this.parent.children=this.parent.children.filter(c=>c!==this);}
- showModal(){this.open=true;}close(){this.open=false;}scrollIntoView(){}click(){return this.onclick?.({target:this});}
+ showModal(){this.open=true;}close(){this.open=false;}scrollIntoView(){}requestSubmit(){}click(){return this.onclick?.({target:this});}
 }
 function matches(el,selector){if(selector==='input:checked')return el.tagName==='input'&&el.checked;if(selector==='input')return el.tagName==='input';if(selector.startsWith('.'))return el.className.split(' ').includes(selector.slice(1));return false;}
 const elements={};const html=fs.readFileSync('neesha/console/static/index.html','utf8');
 for(const match of html.matchAll(/id="([^"]+)"/g))elements['#'+match[1]]=new Element();
-const tabs=['overview','infrastructure','people','graph','evidence','analysis'].map(name=>{const e=new Element('button');e.dataset={tab:name};return e;});
+const tabs=['overview','map','infrastructure','people','graph','evidence','analysis'].map(name=>{const e=new Element('button');e.dataset={tab:name};return e;});
 const modes=['deterministic','single','multi'].map(value=>{const e=new Element('input');e.value=value;return e;});modes[0].checked=true;
 const data={runs:[],sources:[],runtime_providers:[{provider:'openai',ready:true,model:'explicit-model'},{provider:'anthropic',ready:true,model:'explicit-model'}],budget:{period:'2026-11',committed:'0',cap:'10'},job:{state:'idle'}};
 const requests=[];
@@ -52,6 +52,11 @@ vm.runInContext(fs.readFileSync('neesha/console/static/app.js','utf8'),context);
  vm.runInContext("showSource({fact_id:'f-piv',source_record_id:'s-piv',attribute:'dns.subdomain',subject:'example.com',value:'api.example.com',source:'crt.sh',admiralty:'B2',confidence:'high',flags:[]})",context);
  assert.ok(elements['#source-dialog'].open);
  assert.match(elements['#source-content'].textContent,/Pivot: Investigate api\.example\.com/);
+ assert.match(elements['#source-content'].textContent,/Source Connection Lineage/i);
+ vm.runInContext("tab='map';renderView();",context);
+ assert.match(elements['#view'].textContent,/Offline vector Geo-IP & ASN topology map/);
+ assert.match(elements['#view'].textContent,/Source Connection Chart/);
+ assert.match(elements['#view'].textContent,/Export Maltego \(\.graphml\)/);
  vm.runInContext("openOperatorDialog()",context);
  assert.ok(elements['#operator-dialog'].open);
  console.log('Workspace UI state/render smoke checks passed.');

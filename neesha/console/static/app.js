@@ -134,6 +134,63 @@ function showSource(fact) {
   dl.append(text('dt', 'Source URL'), dd);
   root.append(dl);
 
+  // Source Lineage & Sibling Connection Chart inside the Inspector Drawer
+  const lineageBox = text('div', null, 'source-lineage-box');
+  lineageBox.append(text('div', 'SOURCE CONNECTION LINEAGE', 'eyebrow'));
+  const ns = 'http://www.w3.org/2000/svg';
+  const lSvg = document.createElementNS(ns, 'svg');
+  lSvg.setAttribute('viewBox', '0 0 460 74');
+  const stages = [
+    ['SOURCE ADAPTER', String(fact.source || 'osint').slice(0, 18), 10],
+    ['SUBJECT', String(fact.subject || '').slice(0, 18), 160],
+    ['OBSERVATION', String(fact.value || '').slice(0, 18), 310],
+  ];
+  stages.forEach(([kindLbl, valLbl, x], idx) => {
+    if (idx > 0) {
+      const line = document.createElementNS(ns, 'line');
+      line.setAttribute('x1', x - 20);
+      line.setAttribute('y1', 38);
+      line.setAttribute('x2', x);
+      line.setAttribute('y2', 38);
+      line.setAttribute('class', 'radial-spoke-source');
+      lSvg.append(line);
+    }
+    const r = document.createElementNS(ns, 'rect');
+    r.setAttribute('x', x);
+    r.setAttribute('y', 14);
+    r.setAttribute('width', 130);
+    r.setAttribute('height', 46);
+    r.setAttribute('rx', 10);
+    r.setAttribute('class', idx === 0 ? 'radial-source-node' : idx === 1 ? 'radial-hub-node' : 'radial-entity-node');
+    const t1 = document.createElementNS(ns, 'text');
+    t1.setAttribute('x', x + 10);
+    t1.setAttribute('y', 31);
+    t1.setAttribute('class', 'radial-sublabel');
+    t1.textContent = kindLbl;
+    const t2 = document.createElementNS(ns, 'text');
+    t2.setAttribute('x', x + 10);
+    t2.setAttribute('y', 48);
+    t2.setAttribute('class', 'radial-label');
+    t2.textContent = valLbl;
+    lSvg.append(r, t1, t2);
+  });
+  lineageBox.append(lSvg);
+  const siblingFacts = (brief?.facts || []).filter(
+    f => f.fact_id !== fact.fact_id && (f.source_record_id === fact.source_record_id || f.source === fact.source)
+  );
+  if (siblingFacts.length) {
+    lineageBox.append(text('p', `${siblingFacts.length} additional observation(s) connected to source ${fact.source}:`, 'notice'));
+    const sibPills = text('div', null, 'source-connected-pills');
+    siblingFacts.slice(0, 8).forEach(sf => {
+      const btn = text('button', `${sf.attribute.split('.').pop()}: ${String(sf.value).slice(0, 26)}`, 'source-button');
+      btn.type = 'button';
+      btn.onclick = () => showSource(sf);
+      sibPills.append(btn);
+    });
+    lineageBox.append(sibPills);
+  }
+  root.append(lineageBox);
+
   if (isPivotableValue(fact.value, fact.attribute)) {
     const pivotVal = fact.value.trim();
     const actions = text('div', null, 'export-actions source-pivot-bar');
@@ -312,6 +369,7 @@ function renderView() {
   view.replaceChildren();
   const kind = subjectKind();
 
+  if (tab === 'map') { renderGeoMap(view); return; }
   if (tab === 'graph') { renderGraph(view); return; }
   if (tab === 'analysis') { renderAnalysis(view); return; }
 
@@ -748,7 +806,7 @@ function renderOllama() {
   const grid = $('#ollama-providers');
   if (grid) {
     grid.replaceChildren();
-    catalog.slice(0, 8).forEach(m => {
+    catalog.forEach(m => {
       const pId = `ollama:${m.id}`;
       const label = text('label', null, 'provider-choice');
       const input = document.createElement('input');
@@ -1596,6 +1654,8 @@ function renderGraph(view) {
     const p = positions.get(node.id);
     const g = document.createElementNS(ns, 'g');
     g.setAttribute('transform', `translate(${p.x},${p.y})`);
+    g.setAttribute('class', 'graph-node-group');
+    g.onclick = () => showEntityTransformInspector(node);
     const rect = document.createElementNS(ns, 'rect');
     rect.setAttribute('width', NODE_W);
     rect.setAttribute('height', 38);
@@ -1608,7 +1668,7 @@ function renderGraph(view) {
     label.setAttribute('class', 'graph-node-label');
     label.textContent = node.label.length > MAXLEN ? node.label.slice(0, MAXLEN - 1) + '…' : node.label;
     const title = document.createElementNS(ns, 'title');
-    title.textContent = node.label;
+    title.textContent = `${node.label} (Click to inspect & run transform)`;
     g.append(rect, label, title);
     svg.append(g);
   });
@@ -1630,7 +1690,544 @@ function renderGraph(view) {
     panelBox.body.append(row);
   });
   view.append(panelBox.root);
+  renderSourceConnectionChart(view);
 }
+
+function showSourceAdapterInspector(sourceName, sourceFacts) {
+  const root = $('#source-content');
+  if (!root || !brief) return;
+  root.replaceChildren(text('h2', `SOURCE ADAPTER · ${sourceName.toUpperCase()}`));
+  const distinctSubjects = [...new Set(sourceFacts.map(f => f.subject).filter(Boolean))];
+  const distinctValues = [...new Set(sourceFacts.map(f => f.value).filter(Boolean))];
+  const grades = [...new Set(sourceFacts.map(f => f.admiralty).filter(Boolean))];
+  const dl = document.createElement('dl');
+  dl.append(
+    text('dt', 'Intelligence Source'), text('dd', sourceName),
+    text('dt', 'Target Seed'), text('dd', subjectLabel()),
+    text('dt', 'Connected Facts'), text('dd', String(sourceFacts.length)),
+    text('dt', 'Connected Subjects'), text('dd', distinctSubjects.slice(0, 8).join(', ') || '—'),
+    text('dt', 'Admiralty Grades'), text('dd', grades.join(', ') || 'C3'),
+    text('dt', 'Collection Mode'), text('dd', sourceFacts[0]?.collection_mode || 'passive')
+  );
+  root.append(dl);
+
+  const fBox = text('div', null, 'export-actions exposure-citations');
+  sourceFacts.slice(0, 18).forEach(f => {
+    const b = text('button', `${f.admiralty || 'C3'} · ${f.attribute.split('.').pop()}: ${String(f.value).slice(0, 24)}`, 'source-button');
+    b.type = 'button';
+    b.onclick = () => showSource(f);
+    fBox.append(b);
+  });
+  root.append(fBox);
+
+  const pivotCandidate = distinctValues.find(v => isPivotableValue(v, 'domain'));
+  if (pivotCandidate) {
+    const actions = text('div', null, 'export-actions source-pivot-bar');
+    const pivotBtn = text('button', `Run Transform on ${pivotCandidate}`, 'primary');
+    pivotBtn.type = 'button';
+    pivotBtn.onclick = () => {
+      $('#source-dialog').close();
+      setWorkspaceView('command');
+      if ($('#seed-kind')) $('#seed-kind').value = 'auto';
+      $('#domain').value = pivotCandidate;
+      updateSeedInputNotice();
+      $('#investigate').requestSubmit?.();
+    };
+    actions.append(pivotBtn);
+    root.append(actions);
+  }
+  $('#source-dialog').showModal();
+}
+
+function renderSourceConnectionChart(view) {
+  const facts = brief?.facts || [];
+  if (!facts.length) return;
+
+  // Group facts and connected entities by OSINT source adapter
+  const bySource = new Map();
+  facts.forEach(f => {
+    const src = f.source || f.retrieved_by || 'osint';
+    if (!bySource.has(src)) bySource.set(src, []);
+    bySource.get(src).push(f);
+  });
+  const sources = [...bySource.entries()].sort((a, b) => b[1].length - a[1].length);
+
+  const chartPanel = panel('Source Connection Chart · Target Hub, Intelligence Sources & Connected Entities');
+  chartPanel.body.append(
+    text('p', 'Interactive radial hub-and-spoke chart showing every OSINT source connected to the target seed (inner orbit) and the discovered entities/observations connected to each source (outer orbit). Click any source or entity node to inspect its records.', 'notice')
+  );
+
+  // 1. Radial Hub-and-Spoke SVG Chart (Target Center -> OSINT Sources -> Connected Entities)
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  const W = 1000, H = 520, CX = 500, CY = 260, R_INNER = 122, R_OUTER = 218;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-label', 'Source connection hub and spoke chart');
+
+  [R_INNER, R_OUTER].forEach(r => {
+    const orbit = document.createElementNS(ns, 'circle');
+    orbit.setAttribute('cx', CX);
+    orbit.setAttribute('cy', CY);
+    orbit.setAttribute('r', r);
+    orbit.setAttribute('class', 'radial-orbit');
+    svg.append(orbit);
+  });
+
+  const sourceCoords = [];
+  const outerEntities = [];
+
+  sources.forEach(([srcName, sFacts], idx) => {
+    const angle = (2 * Math.PI * idx) / Math.max(1, sources.length) - Math.PI / 2;
+    const sx = Math.round(CX + R_INNER * Math.cos(angle));
+    const sy = Math.round(CY + R_INNER * Math.sin(angle));
+    sourceCoords.push({srcName, sFacts, sx, sy, angle});
+
+    // Pick up to 4 distinct representative connected entities per source for the outer orbit
+    const uniqueVals = [];
+    const seenV = new Set();
+    for (const f of sFacts) {
+      const label = `${f.attribute.split('.').pop()}: ${String(f.value).slice(0, 20)}`;
+      if (!seenV.has(label)) {
+        seenV.add(label);
+        uniqueVals.push({label, rawVal: String(f.value), attr: f.attribute, fact: f});
+      }
+      if (uniqueVals.length >= Math.min(5, Math.max(2, Math.ceil(20 / Math.max(1, sources.length))))) break;
+    }
+    const spread = (Math.PI * 1.35) / Math.max(1, sources.length);
+    uniqueVals.forEach((ent, eIdx) => {
+      const offset = uniqueVals.length === 1 ? 0 : ((eIdx / (uniqueVals.length - 1)) - 0.5) * spread;
+      const eAngle = angle + offset;
+      const ex = Math.round(CX + R_OUTER * Math.cos(eAngle));
+      const ey = Math.round(CY + R_OUTER * Math.sin(eAngle));
+      outerEntities.push({sx, sy, ex, ey, eAngle, ...ent});
+    });
+  });
+
+  // Draw inner spokes (Center Target Hub -> OSINT Source)
+  sourceCoords.forEach(({sx, sy}) => {
+    const line = document.createElementNS(ns, 'line');
+    line.setAttribute('x1', CX);
+    line.setAttribute('y1', CY);
+    line.setAttribute('x2', sx);
+    line.setAttribute('y2', sy);
+    line.setAttribute('class', 'radial-spoke-source');
+    svg.append(line);
+  });
+
+  // Draw outer spokes (OSINT Source -> Connected Entity)
+  outerEntities.forEach(({sx, sy, ex, ey}) => {
+    const path = document.createElementNS(ns, 'path');
+    const mx = Math.round((sx + ex) / 2);
+    const my = Math.round((sy + ey) / 2);
+    path.setAttribute('d', `M${sx},${sy} Q${mx},${my} ${ex},${ey}`);
+    path.setAttribute('class', 'radial-spoke-entity');
+    svg.append(path);
+  });
+
+  // Draw Outer Connected Entity Nodes
+  outerEntities.forEach(ent => {
+    const g = document.createElementNS(ns, 'g');
+    g.setAttribute('transform', `translate(${ent.ex},${ent.ey})`);
+    g.setAttribute('class', 'radial-entity-group');
+    g.onclick = () => showSource(ent.fact);
+
+    const c = document.createElementNS(ns, 'circle');
+    c.setAttribute('r', '7');
+    c.setAttribute('class', 'radial-entity-node');
+
+    const isLeft = Math.cos(ent.eAngle) < -0.15;
+    const t = document.createElementNS(ns, 'text');
+    t.setAttribute('x', isLeft ? '-11' : '11');
+    t.setAttribute('y', '3');
+    if (isLeft) t.setAttribute('text-anchor', 'end');
+    t.setAttribute('class', 'radial-sublabel');
+    t.textContent = ent.label;
+
+    const title = document.createElementNS(ns, 'title');
+    title.textContent = `${ent.fact.attribute} = ${ent.rawVal} (Source: ${ent.fact.source})`;
+    g.append(c, t, title);
+    svg.append(g);
+  });
+
+  // Draw Inner OSINT Source Adapter Nodes
+  sourceCoords.forEach(({srcName, sFacts, sx, sy}) => {
+    const g = document.createElementNS(ns, 'g');
+    g.setAttribute('transform', `translate(${sx - 54},${sy - 17})`);
+    g.setAttribute('class', 'radial-source-group');
+    g.onclick = () => showSourceAdapterInspector(srcName, sFacts);
+
+    const rect = document.createElementNS(ns, 'rect');
+    rect.setAttribute('width', '108');
+    rect.setAttribute('height', '34');
+    rect.setAttribute('rx', '10');
+    rect.setAttribute('class', 'radial-source-node');
+
+    const t1 = document.createElementNS(ns, 'text');
+    t1.setAttribute('x', '54');
+    t1.setAttribute('y', '15');
+    t1.setAttribute('text-anchor', 'middle');
+    t1.setAttribute('class', 'radial-label');
+    t1.textContent = srcName.slice(0, 14).toUpperCase();
+
+    const t2 = document.createElementNS(ns, 'text');
+    t2.setAttribute('x', '54');
+    t2.setAttribute('y', '27');
+    t2.setAttribute('text-anchor', 'middle');
+    t2.setAttribute('class', 'radial-sublabel');
+    t2.textContent = `${sFacts.length} connected`;
+
+    const title = document.createElementNS(ns, 'title');
+    title.textContent = `${srcName}: ${sFacts.length} connected observation(s). Click to inspect all entities from this source.`;
+    g.append(rect, t1, t2, title);
+    svg.append(g);
+  });
+
+  // Draw Center Target Seed Hub
+  const hubG = document.createElementNS(ns, 'g');
+  hubG.setAttribute('transform', `translate(${CX - 72},${CY - 22})`);
+  const hubRect = document.createElementNS(ns, 'rect');
+  hubRect.setAttribute('width', '144');
+  hubRect.setAttribute('height', '44');
+  hubRect.setAttribute('rx', '14');
+  hubRect.setAttribute('class', 'radial-hub-node');
+  const hubT1 = document.createElementNS(ns, 'text');
+  hubT1.setAttribute('x', '72');
+  hubT1.setAttribute('y', '18');
+  hubT1.setAttribute('text-anchor', 'middle');
+  hubT1.setAttribute('class', 'radial-sublabel');
+  hubT1.textContent = 'TARGET SEED';
+  const hubT2 = document.createElementNS(ns, 'text');
+  hubT2.setAttribute('x', '72');
+  hubT2.setAttribute('y', '33');
+  hubT2.setAttribute('text-anchor', 'middle');
+  hubT2.setAttribute('class', 'radial-label');
+  hubT2.textContent = String(subjectLabel()).slice(0, 18);
+  hubG.append(hubRect, hubT1, hubT2);
+  svg.append(hubG);
+
+  const canvasWrap = text('div', null, 'source-chart-canvas');
+  canvasWrap.append(svg);
+  chartPanel.body.append(canvasWrap);
+
+  // 2. Source-to-Entity Distribution Bar Chart & Connected Selectors List
+  const barList = text('div', null, 'source-bar-list');
+  const maxCount = Math.max(1, ...sources.map(([, list]) => list.length));
+  sources.forEach(([srcName, sFacts]) => {
+    const pct = Math.max(6, Math.round((sFacts.length / maxCount) * 100));
+    const row = text('div', null, 'source-bar-row');
+    const head = text('div', null, 'source-bar-head');
+    const left = text('strong', `${srcName} · ${sFacts.length} Connected Observation${sFacts.length === 1 ? '' : 's'}`);
+    const inspectBtn = text('button', `Inspect ${srcName}`, 'secondary');
+    inspectBtn.type = 'button';
+    inspectBtn.onclick = () => showSourceAdapterInspector(srcName, sFacts);
+    head.append(left, inspectBtn);
+
+    const track = text('div', null, 'source-bar-track');
+    const fill = text('div', null, 'source-bar-fill');
+    fill.style.width = `${pct}%`;
+    track.append(fill);
+
+    const pills = text('div', null, 'source-connected-pills');
+    sFacts.slice(0, 10).forEach(f => {
+      const b = text('button', `${f.admiralty || 'C3'} · ${f.attribute.split('.').pop()}: ${String(f.value).slice(0, 28)}`, 'source-button');
+      b.type = 'button';
+      b.onclick = () => showSource(f);
+      pills.append(b);
+    });
+    row.append(head, track, pills);
+    barList.append(row);
+  });
+  chartPanel.body.append(barList);
+  view.append(chartPanel.root);
+}
+
+// Simplified continental silhouettes on a 1000x500 equirectangular projection
+const WORLD_CONTINENT_PATHS = [
+  // North America
+  'M85,68 L175,58 L262,72 L308,118 L272,165 L235,198 L210,224 L178,205 L145,168 L95,124 Z',
+  // Greenland
+  'M330,42 L398,38 L412,76 L356,88 Z',
+  // South America
+  'M245,238 L318,252 L352,304 L328,392 L292,438 L268,385 L242,302 Z',
+  // Europe
+  'M458,72 L548,62 L588,92 L572,146 L516,158 L462,144 L448,108 Z',
+  // Africa
+  'M452,168 L545,168 L596,225 L588,318 L546,386 L504,376 L478,298 L442,232 Z',
+  // Asia
+  'M588,68 L765,58 L878,86 L892,155 L836,224 L758,246 L685,228 L612,188 L582,135 Z',
+  // Japan & SE Asia islands
+  'M832,248 L882,258 L894,296 L842,292 Z',
+  // Australia & New Zealand
+  'M776,326 L882,322 L904,382 L846,412 L782,388 Z',
+  'M924,404 L952,412 L944,436 L918,426 Z',
+];
+
+function showEntityTransformInspector(node) {
+  const root = $('#source-content');
+  if (!root || !brief) return;
+  root.replaceChildren(text('h2', `${node.kind.toUpperCase()} · ${node.label}`));
+  const dl = document.createElement('dl');
+  const connectedEdges = (brief.graph?.edges || []).filter(e => e.source === node.id || e.target === node.id);
+  const factIds = new Set();
+  connectedEdges.forEach(e => (e.evidence_ids || []).forEach(id => factIds.add(id)));
+  const relatedFacts = (brief.facts || []).filter(f => factIds.has(f.fact_id) || f.subject === node.label || f.value === node.label);
+
+  dl.append(
+    text('dt', 'Entity Label'), text('dd', node.label),
+    text('dt', 'Entity Kind'), text('dd', node.kind),
+    text('dt', 'Connected Links'), text('dd', String(connectedEdges.length)),
+    text('dt', 'Supporting Facts'), text('dd', String(relatedFacts.length))
+  );
+  root.append(dl);
+
+  if (relatedFacts.length) {
+    const fBox = text('div', null, 'export-actions exposure-citations');
+    relatedFacts.slice(0, 12).forEach(f => fBox.append(sourceButton(f)));
+    root.append(fBox);
+  }
+
+  if (isPivotableValue(node.label, node.kind)) {
+    const actions = text('div', null, 'export-actions source-pivot-bar');
+    const pivotBtn = text('button', `Run Transform: Investigate ${node.label}`, 'primary');
+    pivotBtn.type = 'button';
+    pivotBtn.onclick = () => {
+      $('#source-dialog').close();
+      setWorkspaceView('command');
+      if ($('#seed-kind')) $('#seed-kind').value = 'auto';
+      $('#domain').value = node.label;
+      updateSeedInputNotice();
+      $('#investigate').requestSubmit?.();
+    };
+    actions.append(pivotBtn);
+    root.append(actions);
+  }
+  $('#source-dialog').showModal();
+}
+
+function showGeoNodeInspector(pt) {
+  const root = $('#source-content');
+  if (!root || !brief) return;
+  root.replaceChildren(text('h2', `HOST NODE · ${pt.ip}`));
+  const dl = document.createElement('dl');
+  for (const [k, v] of Object.entries({
+    'IP Address': pt.ip,
+    'Primary Hostname': pt.label,
+    'All Hostnames': (pt.hostnames || []).join(', ') || pt.ip,
+    'Location': `${pt.city || pt.country_name} (${pt.country})`,
+    'Coordinates': `${pt.lat}, ${pt.lon}`,
+    'Organization / ISP': pt.org || 'Unknown',
+    'ASN': pt.asn || 'Unspecified',
+    'CIDR Block': pt.cidr || '—',
+    'Open Ports': (pt.ports || []).join(', ') || 'None observed',
+    'CVEs / Advisories': (pt.vulns || []).join(', ') || 'None observed',
+    'CPE Fingerprints': (pt.cpes || []).join(', ') || 'None observed',
+  })) {
+    dl.append(text('dt', k), text('dd', v));
+  }
+  root.append(dl);
+
+  const facts = (brief.facts || []).filter(f => (pt.fact_ids || []).includes(f.fact_id) || f.subject === pt.ip || f.value === pt.ip);
+  if (facts.length) {
+    const fBox = text('div', null, 'export-actions exposure-citations');
+    facts.slice(0, 12).forEach(f => fBox.append(sourceButton(f)));
+    root.append(fBox);
+  }
+
+  const actions = text('div', null, 'export-actions source-pivot-bar');
+  const pivotBtn = text('button', `Run Shodan / Host Transform on ${pt.ip}`, 'primary');
+  pivotBtn.type = 'button';
+  pivotBtn.onclick = () => {
+    $('#source-dialog').close();
+    setWorkspaceView('command');
+    if ($('#seed-kind')) $('#seed-kind').value = 'ip';
+    $('#domain').value = pt.ip;
+    updateSeedInputNotice();
+    $('#investigate').requestSubmit?.();
+  };
+  actions.append(pivotBtn);
+  root.append(actions);
+  $('#source-dialog').showModal();
+}
+
+function renderGeoMap(view) {
+  const geo = brief.geo_map || {points: [], arcs: [], summary: {total_nodes: 0, countries_count: 0, providers_count: 0, open_ports_count: 0, vulnerable_nodes_count: 0, countries: [], providers: []}};
+  const points = geo.points || [];
+  const summary = geo.summary || {};
+
+  const toolbar = text('div', null, 'graph-toolbar');
+  toolbar.append(
+    text('p', 'Offline vector Geo-IP & ASN topology map. Plots discovered IPv4/IPv6 infrastructure, Shodan open ports/CVEs, and hosting jurisdictions locally without external map-tile requests.', 'notice')
+  );
+  const actions = text('div', null, 'export-actions');
+  const btnGraphml = text('button', 'Export Maltego (.graphml)', 'secondary');
+  btnGraphml.type = 'button';
+  btnGraphml.onclick = () => downloadMaltego('maltego.graphml');
+  const btnCsv = text('button', 'Export Maltego (.csv)', 'secondary');
+  btnCsv.type = 'button';
+  btnCsv.onclick = () => downloadMaltego('maltego.csv');
+  actions.append(btnGraphml, btnCsv);
+  toolbar.append(actions);
+  view.append(toolbar);
+
+  // Summary strip
+  const sumGrid = text('div', null, 'posture-grid');
+  [
+    ['MAPPED IP NODES', String(summary.total_nodes || 0), 'Resolved infrastructure hosts'],
+    ['COUNTRIES', String(summary.countries_count || 0), 'Distinct hosting jurisdictions'],
+    ['ASN / PROVIDERS', String(summary.providers_count || 0), 'Network & cloud operators'],
+    ['OPEN PORTS', String(summary.open_ports_count || 0), 'Shodan / InternetDB ports'],
+    ['CVE HOSTS', String(summary.vulnerable_nodes_count || 0), 'Hosts with advisory matches'],
+  ].forEach(([title, val, sub]) => {
+    const card = text('div', null, 'posture-card');
+    const top = text('div', null, 'posture-card-top');
+    top.append(text('h3', title), text('span', val, 'grade-badge'));
+    card.append(top, text('p', sub));
+    sumGrid.append(card);
+  });
+  view.append(sumGrid);
+
+  // World SVG Map Canvas
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('viewBox', '0 0 1000 500');
+  svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-label', 'Global Geo-IP and ASN infrastructure map');
+
+  // Graticule lines
+  for (let x = 100; x < 1000; x += 100) {
+    const line = document.createElementNS(ns, 'line');
+    line.setAttribute('x1', x);
+    line.setAttribute('y1', 0);
+    line.setAttribute('x2', x);
+    line.setAttribute('y2', 500);
+    line.setAttribute('class', 'geo-graticule');
+    svg.append(line);
+  }
+  for (let y = 83; y < 500; y += 83) {
+    const line = document.createElementNS(ns, 'line');
+    line.setAttribute('x1', 0);
+    line.setAttribute('y1', y);
+    line.setAttribute('x2', 1000);
+    line.setAttribute('y2', y);
+    line.setAttribute('class', y === 249 ? 'geo-equator' : 'geo-graticule');
+    svg.append(line);
+  }
+
+  // Continental silhouettes
+  WORLD_CONTINENT_PATHS.forEach(d => {
+    const p = document.createElementNS(ns, 'path');
+    p.setAttribute('d', d);
+    p.setAttribute('class', 'geo-continent');
+    svg.append(p);
+  });
+
+  // Geodesic arcs between infrastructure nodes
+  (geo.arcs || []).forEach(arc => {
+    const path = document.createElementNS(ns, 'path');
+    const mx = (arc.x1 + arc.x2) / 2;
+    const my = Math.min(arc.y1, arc.y2) - 42;
+    path.setAttribute('d', `M${arc.x1},${arc.y1} Q${mx},${my} ${arc.x2},${arc.y2}`);
+    path.setAttribute('class', 'geo-arc');
+    svg.append(path);
+  });
+
+  // Plot each IP pin
+  points.forEach(pt => {
+    const g = document.createElementNS(ns, 'g');
+    g.setAttribute('transform', `translate(${pt.x},${pt.y})`);
+    g.setAttribute('class', `geo-pin ${pt.severity || 'normal'}`);
+    g.onclick = () => showGeoNodeInspector(pt);
+
+    const halo = document.createElementNS(ns, 'circle');
+    halo.setAttribute('r', '14');
+    halo.setAttribute('class', 'geo-pin-halo');
+
+    const core = document.createElementNS(ns, 'circle');
+    core.setAttribute('r', '5.5');
+    core.setAttribute('class', 'geo-pin-core');
+
+    const lbl = document.createElementNS(ns, 'text');
+    lbl.setAttribute('x', '9');
+    lbl.setAttribute('y', '3');
+    lbl.setAttribute('class', 'geo-pin-label');
+    lbl.textContent = `${pt.ip} (${pt.country})`;
+
+    const title = document.createElementNS(ns, 'title');
+    title.textContent = `${pt.ip} · ${pt.city} (${pt.country_name}) · ${pt.org} · Ports: ${(pt.ports || []).join(', ') || 'none'}`;
+
+    g.append(halo, core, lbl, title);
+    svg.append(g);
+  });
+
+  const mapWrap = text('div', null, 'geo-map-canvas');
+  mapWrap.append(svg);
+  view.append(mapWrap);
+
+  if (!points.length) {
+    view.append(empty('No routable IPv4/IPv6 hosts observed in this run.', 'Run a domain, website, or IP investigation with DNS Posture, Shodan InternetDB, or Passive DNS enabled to populate the global infrastructure map.'));
+    renderSourceConnectionChart(view);
+    return;
+  }
+
+  // Country & Provider breakdown + Host cards
+  const breakdownGrid = text('div', null, 'overview-grid');
+  const countryBox = panel('Jurisdictions & Geographic Footprint');
+  (summary.countries || []).forEach(c => {
+    const row = text('div', null, 'requirement');
+    row.append(text('h3', `${c.name} (${c.code}) — ${c.count} host${c.count === 1 ? '' : 's'}`));
+    countryBox.body.append(row);
+  });
+  const providerBox = panel('ASN & Cloud Hosting Concentration');
+  (summary.providers || []).forEach(p => {
+    const row = text('div', null, 'requirement');
+    row.append(text('h3', `${p.name} — ${p.count} host${p.count === 1 ? '' : 's'}`));
+    providerBox.body.append(row);
+  });
+  breakdownGrid.append(countryBox.root, providerBox.root);
+  view.append(breakdownGrid);
+
+  const hostsBox = panel('Mapped Host Nodes · Click to Inspect or Pivot');
+  const hostGrid = text('div', null, 'geo-host-grid');
+  points.forEach(pt => {
+    const card = text('div', null, 'posture-card');
+    const top = text('div', null, 'posture-card-top');
+    top.append(text('h3', `${pt.ip} · ${pt.country}`), text('span', pt.asn, 'tag'));
+    card.append(
+      top,
+      text('p', `${pt.org} · ${pt.city} (${pt.lat}, ${pt.lon})`),
+      text('p', `Hostnames: ${(pt.hostnames || []).join(', ') || pt.label}`),
+      text('p', `Ports: ${(pt.ports || []).join(', ') || 'none'}${pt.vulns?.length ? ' · CVEs: ' + pt.vulns.join(', ') : ''}`)
+    );
+    const inspectBtn = text('button', 'Inspect & Run Transform', 'secondary');
+    inspectBtn.type = 'button';
+    inspectBtn.onclick = () => showGeoNodeInspector(pt);
+    card.append(inspectBtn);
+    hostGrid.append(card);
+  });
+  hostsBox.body.append(hostGrid);
+  view.append(hostsBox.root);
+  renderSourceConnectionChart(view);
+}
+
+async function downloadMaltego(fmt) {
+  if (!brief) return;
+  try {
+    const data = await api(`/api/runs/${encodeURIComponent(brief.run_id)}/${fmt}`);
+    const url = URL.createObjectURL(new Blob([data.content], {type: data.content_type || 'text/plain;charset=utf-8'}));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = data.filename || `find3r-${brief.run_id}-${fmt}`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    message(`Exported Maltego ${fmt === 'maltego.graphml' ? 'GraphML (.graphml)' : 'Entity Table (.csv)'} for ${subjectLabel()}.`);
+  } catch (err) {
+    message(err.message, true);
+  }
+}
+
+if ($('#export-maltego-graphml')) $('#export-maltego-graphml').onclick = () => downloadMaltego('maltego.graphml');
+if ($('#export-maltego-csv')) $('#export-maltego-csv').onclick = () => downloadMaltego('maltego.csv');
 
 function renderAnalysis(view) {
   const box = panel('Agent Harness');
@@ -1639,7 +2236,7 @@ function renderAnalysis(view) {
     provider: p.provider,
     label: `${p.provider} · ${p.model}`,
   }));
-  const ollamaAvailable = (snapshot?.ollama?.catalog || []).slice(0, 8).map(m => ({
+  const ollamaAvailable = (snapshot?.ollama?.catalog || []).map(m => ({
     provider: `ollama:${m.id}`,
     label: `ollama (local $0) · ${m.id} (${m.label})`,
   }));

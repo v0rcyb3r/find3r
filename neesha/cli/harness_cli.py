@@ -623,3 +623,22 @@ def harness_serve(
     engine = get_engine()
     _require_schema(engine)
     serve(engine, port=port)
+
+
+@harness_app.command('maltego-transform')
+def harness_maltego_transform(
+    run_id: str = typer.Argument(..., help="Run ID to emit as Maltego Local Transform XML"),
+) -> None:
+    """Emit guarded facts from a stored run as Maltego Local Transform XML."""
+    import sys
+    from neesha.harness.brief import build_brief
+    from neesha.harness.mapping import build_maltego_transform_xml
+
+    engine = get_engine()
+    _require_schema(engine)
+    try:
+        brief = build_brief(engine, run_id)
+    except (sa.exc.NoResultFound, ValueError) as exc:
+        console.print(f"[red]run not found or invalid:[/red] {exc}")
+        raise typer.Exit(1)
+    sys.stdout.write(build_maltego_transform_xml(brief.get('facts') or []))

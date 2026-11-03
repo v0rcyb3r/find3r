@@ -14,6 +14,7 @@ from neesha.evidence.models import Evidence
 from neesha.guardrail.engine import Guardrail
 from neesha.harness.scoring import grade_brief_posture, score_brief
 from neesha.harness.graph import build_graph
+from neesha.harness.mapping import build_geo_map
 from neesha.harness.power_map import build_power_map
 
 
@@ -142,6 +143,7 @@ def build_brief(engine: sa.Engine, run_id: str, profile=None) -> dict:
         'exposures': posture['exposures'],
         'collection': collection,
         'graph': build_graph(company, facts, subject_kind=subject_kind),
+        'geo_map': build_geo_map(company, facts, subject_kind=subject_kind),
         'power_map': build_power_map(facts) if not root_subject else [],
         'run_id': run_id, 'company': company, 'status': run['status'],
         'stop_reason': run['stop_reason'], 'requirements': requirements,

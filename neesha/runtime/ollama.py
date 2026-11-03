@@ -11,7 +11,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-from neesha.adapters.tool_installer import ensure_tool_paths_in_env, find_tool_binary, install_tool
+from neesha.adapters.tool_installer import _safe_subprocess_env, ensure_tool_paths_in_env, find_tool_binary, install_tool
 from neesha.runtime.providers import MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, MAX_TEXT_CHARS, ProviderError, _NoRedirect
 
 OLLAMA_HOST = "http://127.0.0.1:11434"
@@ -110,6 +110,7 @@ def ensure_ollama_running(wait_seconds: float = 4.0) -> bool:
     try:
         subprocess.Popen(
             [binary, "serve"],
+            env=_safe_subprocess_env(),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,
@@ -129,12 +130,16 @@ def _scan_offline_manifests() -> list[dict[str, Any]]:
     """Discover manually installed models from ~/.ollama/models/manifests even when daemon is stopped."""
     from pathlib import Path
     manifests_root = Path(os.environ.get("OLLAMA_MODELS", str(Path.home() / ".ollama" / "models"))) / "manifests"
-    if not manifests_root.is_dir():
+    if not manifests_root.is_dir() or manifests_root.is_symlink():
         return []
     found: list[dict[str, Any]] = []
+    scanned = 0
     try:
         for tag_file in sorted(manifests_root.rglob("*")):
-            if not tag_file.is_file() or tag_file.name.startswith("."):
+            scanned += 1
+            if scanned > 200:
+                break
+            if tag_file.is_symlink() or not tag_file.is_file() or tag_file.name.startswith("."):
                 continue
             rel = tag_file.relative_to(manifests_root).parts
             # Standard layout: registry.ollama.ai/library/<model>/<tag> or <registry>/<ns>/<model>/<tag>
@@ -291,6 +296,7 @@ def pull_ollama_model(model: str) -> dict[str, Any]:
     try:
         proc = subprocess.run(
             [binary, "pull", target_model],
+            env=_safe_subprocess_env(),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -325,7 +331,11 @@ def create_custom_ollama_model(name: str, source: str) -> dict[str, Any]:
     target_name = valid_ollama_model(raw_name)
 
     raw_source = (source or "").strip()
-    if not raw_source or len(raw_source) > 512 or any(c in raw_source for c in ("\n", "\r", "\x00")):
+    if (
+        not raw_source
+        or len(raw_source) > 512
+        or any(ord(c) < 32 or c in ('"', "'", "\x7f") for c in raw_source)
+    ):
         raise ValueError("Enter a valid local .gguf path, Modelfile path, or base Ollama model tag.")
 
     binary = find_tool_binary("ollama")
@@ -341,24 +351,41 @@ def create_custom_ollama_model(name: str, source: str) -> dict[str, Any]:
 
     is_path_like = (
         raw_source.startswith(("/", "~/", "./", "../"))
-        or raw_source.lower().endswith((".gguf", ".bin", ".safetensors", "modelfile"))
+        or bool(re.match(r"^[A-Za-z]:[\\/]", raw_source))
+        or raw_source.lower().endswith((".gguf", ".bin", ".safetensors", "modelfile", ".modelfile"))
     )
     temp_dir = None
     try:
         if is_path_like:
-            resolved = Path(raw_source).expanduser().resolve()
-            if not resolved.is_file():
-                raise ValueError(f"Local model file not found at {resolved}.")
-            if resolved.name.lower() == "modelfile" or resolved.name.lower().endswith(".modelfile"):
+            candidate = Path(raw_source).expanduser()
+            lower_name = candidate.name.lower()
+            is_modelfile = lower_name == "modelfile" or lower_name.endswith(".modelfile")
+            is_weights = candidate.suffix.lower() in (".gguf", ".bin", ".safetensors")
+            if not (is_modelfile or is_weights):
+                raise ValueError("Local file must be a .gguf/.safetensors weights file or a Modelfile.")
+            if candidate.is_symlink():
+                raise ValueError("Symbolic links are not permitted for local model imports.")
+            resolved = candidate.resolve()
+            if any(c in str(resolved) for c in ('"', "'", "\n", "\r")) or not resolved.is_file():
+                raise ValueError("Specified local model file or Modelfile was not found.")
+            if is_modelfile:
+                if resolved.stat().st_size > 65536:
+                    raise ValueError("Modelfile exceeds the 64 KiB size limit.")
+                mf_text = resolved.read_text(encoding="utf-8", errors="replace")
+                for line in mf_text.splitlines():
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("#"):
+                        continue
+                    upper = stripped.upper()
+                    if upper.startswith("ADAPTER "):
+                        raise ValueError("ADAPTER directives are not permitted in imported Modelfiles.")
                 modelfile_path = str(resolved)
-            elif resolved.suffix.lower() in (".gguf", ".bin", ".safetensors"):
+            else:
                 temp_dir = tempfile.mkdtemp(prefix="find3r-ollama-")
                 os.chmod(temp_dir, 0o700)
                 mf = Path(temp_dir) / "Modelfile"
                 mf.write_text(f'FROM "{resolved}"\nPARAMETER temperature 0.1\n', encoding="utf-8")
                 modelfile_path = str(mf)
-            else:
-                raise ValueError("Local file must be a .gguf/.safetensors weights file or a Modelfile.")
         else:
             base_model = valid_ollama_model(raw_source)
             temp_dir = tempfile.mkdtemp(prefix="find3r-ollama-")
@@ -369,6 +396,7 @@ def create_custom_ollama_model(name: str, source: str) -> dict[str, Any]:
 
         proc = subprocess.run(
             [binary, "create", target_name, "-f", modelfile_path],
+            env=_safe_subprocess_env(),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -383,9 +411,7 @@ def create_custom_ollama_model(name: str, source: str) -> dict[str, Any]:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     if proc.returncode != 0:
-        out = (proc.stdout or "").strip()
-        tail = "\n".join(out.splitlines()[-4:]) if out else "ollama create returned non-zero status."
-        raise ValueError(f"Ollama create failed for {target_name}: {tail}")
+        raise ValueError(f"Ollama create failed for {target_name}. Verify the base model tag or weights file format.")
 
     os.environ["NEESHA_OLLAMA_MODEL"] = target_name
     status = ollama_status()
