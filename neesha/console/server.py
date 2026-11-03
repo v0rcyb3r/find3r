@@ -82,15 +82,32 @@ def _aware(value):
 
 class Workspace:
     def __init__(self, engine: sa.Engine, sources: set[str] | None = None, profile_path: Path | None = None,
-                 reports_root: Path | None = None, settings_path: Path | None = None):
+                 reports_root: Path | None = None, settings_path: Path | None = None,
+                 host: str = '127.0.0.1', team_key: str | None = None):
         self.engine = engine
         self.sources = sources
         self.profile_path = profile_path or (Path(__file__).resolve().parents[2] / "config" / "service-profile.json")
         self.settings_path = settings_path or (self.profile_path.parent / "runtime-settings.json")
         self.reports_root = reports_root or (Path(__file__).resolve().parents[2] / 'reports')
+        self.host = host or os.environ.get('FIND3R_HOST', '127.0.0.1')
+        self.team_key = (team_key if team_key is not None else os.environ.get('FIND3R_TEAM_KEY', '')).strip()
+        self.team_mode = bool(
+            self.team_key
+            or self.host not in ('127.0.0.1', 'localhost', '::1')
+            or os.environ.get('FIND3R_TEAM_MODE') == '1'
+        )
         self.token = secrets.token_urlsafe(32)
         self.lock = threading.Lock()
         self.job = {'state': 'idle'}
+        self.active_jobs: dict[str, dict] = {}
+        self.max_concurrent_jobs = 4
+        self.operators: dict[str, dict] = {
+            'local-analyst': {
+                'callsign': 'local-analyst',
+                'role': 'Lead Analyst',
+                'last_seen': datetime.now(timezone.utc).isoformat(),
+            }
+        }
         self.analyzing: set[str] = set()
         self._catalog_cache: tuple[float, list[dict]] | None = None
         self._brief_cache: dict[str, tuple[float, dict]] = {}
@@ -99,6 +116,34 @@ class Workspace:
         from neesha.harness.operations import OperationsManager
         self.vultr = VultrManager(self.profile_path.parent)
         self.operations = OperationsManager(self.profile_path.parent / "operations-store.json")
+
+    def register_operator(self, payload: dict) -> dict:
+        callsign = str(payload.get('callsign') or 'local-analyst').strip()[:48] or 'local-analyst'
+        role = str(payload.get('role') or 'Partner Analyst').strip()[:48]
+        provided_key = str(payload.get('team_key') or '').strip()
+        if self.team_key and not secrets.compare_digest(provided_key, self.team_key):
+            raise ValueError('Invalid Team Passkey. Enter the shared FIND3R_TEAM_KEY.')
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with self.lock:
+            self.operators[callsign.lower()] = {
+                'callsign': callsign,
+                'role': role,
+                'last_seen': now_iso,
+            }
+            ops_list = list(self.operators.values())[:20]
+        return {
+            'authenticated': True,
+            'operator': {'callsign': callsign, 'role': role, 'last_seen': now_iso},
+            'token': self.token,
+            'team_mode': self.team_mode,
+            'operators': ops_list,
+            'team': {
+                'team_mode': self.team_mode,
+                'key_required': bool(self.team_key),
+                'host': self.host,
+                'operators': ops_list,
+            },
+        }
 
     def _load_saved_settings(self):
         if not self.settings_path.exists():
@@ -146,16 +191,39 @@ class Workspace:
                 schema.entity.c.kind.label('subject_kind')
             ).join(schema.entity, schema.run.c.company_id == schema.entity.c.id)
               .order_by(schema.run.c.started_at.desc()).limit(100)).mappings().all()
+        runs_list = [dict(r) for r in runs]
+        seen_ids = {r['id'] for r in runs_list}
+        with self.operations.lock:
+            imp_briefs = dict((self.operations._load().get('imported_briefs')) or {})
+        for rid, b_obj in imp_briefs.items():
+            if rid not in seen_ids and isinstance(b_obj, dict):
+                runs_list.append({
+                    'id': rid,
+                    'status': b_obj.get('status') or 'complete',
+                    'started_at': b_obj.get('started_at') or datetime.now(timezone.utc).isoformat(),
+                    'stop_reason': b_obj.get('stop_reason') or 'imported-bundle',
+                    'company': b_obj.get('company') or rid,
+                    'subject_kind': b_obj.get('subject_kind') or 'domain',
+                })
         with self.lock:
             job = dict(self.job)
+            active_jobs = list(self.active_jobs.values())
+            ops_list = list(self.operators.values())[:20]
         budget = Ledger(self.engine).summary()
         from neesha.adapters.tool_installer import detect_os_platform
         from neesha.runtime.ollama import ollama_status
         return {
-            'runs': [dict(r) for r in runs],
+            'runs': runs_list,
             'budget': {'cap': str(budget.cap_usd), 'committed': str(budget.committed_usd),
                        'remaining': str(budget.remaining_usd), 'period': budget.period},
             'job': job,
+            'active_jobs': active_jobs,
+            'team': {
+                'team_mode': self.team_mode,
+                'key_required': bool(self.team_key),
+                'host': self.host,
+                'operators': ops_list,
+            },
             'sources': self._catalog(),
             'runtime_providers': provider_readiness(),
             'ollama': ollama_status(),
@@ -337,12 +405,18 @@ class Workspace:
     def brief(self, run_id):
         now = time.monotonic()
         cached = self._brief_cache.get(run_id)
-        if cached and (now - cached[0]) < 15.0 and self.job.get('run_id') != run_id:
+        if cached and (now - cached[0]) < 15.0 and self.job.get('run_id') != run_id and run_id not in self.active_jobs:
             brief = dict(cached[1])
         else:
-            brief = build_brief(self.engine, run_id, self.profile())
-            if brief.get('status') in ('complete', 'stopped'):
-                self._brief_cache[run_id] = (now, dict(brief))
+            try:
+                brief = build_brief(self.engine, run_id, self.profile())
+                if brief.get('status') in ('complete', 'stopped'):
+                    self._brief_cache[run_id] = (now, dict(brief))
+            except sa.exc.NoResultFound:
+                imported = self.operations.get_imported_brief(run_id)
+                if imported is None:
+                    raise
+                brief = dict(imported)
         path = self._analysis_path(run_id)
         if path.exists():
             try:
@@ -404,7 +478,7 @@ class Workspace:
     def delete(self, run_id):
         from neesha.harness.deletion import delete_investigation
         with self.lock:
-            if self.job['state'] == 'running' or self.analyzing:
+            if run_id in self.active_jobs or (self.job.get('state') == 'running' and self.job.get('run_id') == run_id) or run_id in self.analyzing:
                 raise ValueError('Wait for collection and model analysis to finish before deleting an investigation.')
             result = delete_investigation(self.engine, run_id, self.reports_root)
             self._brief_cache.pop(run_id, None)
@@ -437,6 +511,7 @@ class Workspace:
             # Empty facts validates configuration without a model call or charge.
             analyze_brief(self.engine, {'facts': []}, mode, providers)
 
+        operator = str(payload.get('operator') or 'local-analyst').strip()[:48] or 'local-analyst'
         now = datetime.now(timezone.utc)
         engagement_id = uuid4().hex
         is_personal_kind = subject_kind in ('email', 'username')
@@ -454,8 +529,8 @@ class Workspace:
         website = payload.get('website') is not False
         run_id = uuid4().hex
         with self.lock:
-            if self.job['state'] == 'running':
-                raise ValueError('An investigation is already running. Wait for it to finish.')
+            if len(self.active_jobs) >= self.max_concurrent_jobs:
+                raise ValueError(f'Maximum concurrent investigations ({self.max_concurrent_jobs}) running. Wait for a slot to finish.')
             with self.engine.begin() as conn:
                 conn.execute(schema.engagement.insert().values(
                     id=engagement_id, authority_basis=engagement.authority_basis,
@@ -463,16 +538,107 @@ class Workspace:
                     authorized_emails=list(engagement.authorized_emails),
                     authorized_usernames=list(engagement.authorized_usernames),
                     permitted_techniques=list(engagement.permitted_techniques),
-                    authorized_by='local-workspace:public-research',
+                    authorized_by=f'{operator}:public-research',
                     starts_at=engagement.starts_at, expires_at=engagement.expires_at,
                     created_at=now,
                 ))
-            self.job = {'state': 'running', 'domain': domain, 'run_id': run_id,
-                        'seed_kind': seed_kind, 'subject_kind': subject_kind,
-                        'seed_reason': seed['reason'], 'analysis_mode': mode}
+            job_entry = {
+                'state': 'running',
+                'domain': domain,
+                'run_id': run_id,
+                'seed_kind': seed_kind,
+                'subject_kind': subject_kind,
+                'seed_reason': seed['reason'],
+                'analysis_mode': mode,
+                'operator': operator,
+            }
+            self.job = job_entry
+            self.active_jobs[run_id] = job_entry
         threading.Thread(target=self._run, args=(domain, engagement, contacts, website,
                          subject_kind, mode, providers, run_id), daemon=True).start()
-        return {'state': 'running', 'domain': domain, 'run_id': run_id, 'subject_kind': subject_kind}
+        return {'state': 'running', 'domain': domain, 'run_id': run_id, 'subject_kind': subject_kind, 'operator': operator}
+
+    def launch_batch(self, payload: dict) -> dict:
+        raw_targets = payload.get('targets')
+        if isinstance(raw_targets, str):
+            raw_list = [t.strip() for line in raw_targets.splitlines() for t in line.split(',') if t.strip()]
+        elif isinstance(raw_targets, list):
+            raw_list = [str(t).strip() for t in raw_targets if str(t).strip()]
+        else:
+            raw_list = []
+        # Deduplicate while preserving order, cap at 20 targets per batch
+        targets: list[str] = []
+        for t in raw_list:
+            if t not in targets:
+                targets.append(t)
+            if len(targets) >= 20:
+                break
+        if not targets:
+            raise ValueError('Enter at least one domain, email, username, or IP address for batch collection.')
+
+        case_title = str(payload.get('case_title') or '').strip()[:120]
+        contacts = payload.get('contacts') is True
+        website = payload.get('website') is not False
+        operator = str(payload.get('operator') or 'local-analyst').strip()[:48] or 'local-analyst'
+
+        # Validate at least the first seed synchronously so invalid input fails fast
+        valid_seeds = []
+        skipped_seeds = []
+        for t in targets:
+            try:
+                s = resolve_seed(t, 'auto')
+                if s['requires_resolution']:
+                    skipped_seeds.append({'target': t, 'reason': s['reason']})
+                else:
+                    valid_seeds.append(t)
+            except Exception as exc:
+                skipped_seeds.append({'target': t, 'reason': str(exc)})
+        if not valid_seeds:
+            raise ValueError('None of the provided batch targets could be resolved as valid selectors.')
+
+        batch_id = uuid4().hex[:12]
+
+        def _batch_worker():
+            completed_runs: list[str] = []
+            for seed_val in valid_seeds:
+                # Wait if all concurrent slots are full
+                for _ in range(300):
+                    with self.lock:
+                        if len(self.active_jobs) < self.max_concurrent_jobs:
+                            break
+                    time.sleep(0.5)
+                try:
+                    res = self.launch({
+                        'seed': seed_val,
+                        'domain': seed_val,
+                        'kind': 'auto',
+                        'contacts': contacts,
+                        'website': website,
+                        'analysis_mode': 'deterministic',
+                        'operator': operator,
+                    })
+                    completed_runs.append(res['run_id'])
+                except Exception:
+                    continue
+            if case_title and completed_runs:
+                try:
+                    self.operations.save_case({
+                        'title': case_title,
+                        'client': f'Batch Queue ({len(completed_runs)} targets)',
+                        'classification': 'TLP:AMBER+STRICT',
+                        'run_ids': completed_runs,
+                    })
+                except Exception:
+                    pass
+
+        threading.Thread(target=_batch_worker, daemon=True).start()
+        return {
+            'batch_id': batch_id,
+            'queued_count': len(valid_seeds),
+            'queued_targets': valid_seeds,
+            'skipped_targets': skipped_seeds,
+            'case_title': case_title or None,
+        }
 
     def _run(self, domain, engagement, contacts, website=True, subject_kind='domain',
              analysis_mode='deterministic', providers=None, run_id=None):
@@ -480,6 +646,8 @@ class Workspace:
             def progress(update):
                 with self.lock:
                     self.job.update(update)
+                    if run_id and run_id in self.active_jobs:
+                        self.active_jobs[run_id].update(update)
 
             remote_node = self.vultr.get_active_remote_node() if self.sources is None else None
             if remote_node is not None:
@@ -558,19 +726,36 @@ class Workspace:
             job = {'state': 'failed', 'domain': domain,
                    'error': 'Investigation could not finish. Review the local run records before retrying.'}
         with self.lock:
-            self.job = job
+            if run_id:
+                self.active_jobs.pop(run_id, None)
+            if self.active_jobs:
+                # Keep self.job pointing to an active job if another scan is still running
+                self.job = dict(next(iter(self.active_jobs.values())))
+            else:
+                self.job = job
 
 
 def make_handler(workspace: Workspace):
     class Handler(BaseHTTPRequestHandler):
         def _local_request(self):
             host = self.headers.get('Host', '')
-            if host not in (f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}'):
-                return False
+            if not workspace.team_mode:
+                if host not in (f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}'):
+                    return False
+            else:
+                if not host or any(ch in host for ch in ('/', '\\', ' ', '@')):
+                    return False
             sec_fetch_site = (self.headers.get('Sec-Fetch-Site') or '').strip().lower()
             if sec_fetch_site and sec_fetch_site not in ('same-origin', 'none'):
                 return False
             return True
+
+        def _valid_origin(self) -> bool:
+            host = self.headers.get('Host', '')
+            origin = self.headers.get('Origin', '')
+            if not workspace.team_mode:
+                return origin == f'http://{host}'
+            return origin in (f'http://{host}', f'https://{host}')
 
         def _send(self, status, body, content_type='application/json'):
             import gzip
@@ -602,7 +787,11 @@ def make_handler(workspace: Workspace):
                 filename, mime = assets[path]
                 return self._send(200, (STATIC / filename).read_bytes(), mime)
             if path == '/api/session':
-                return self._send(200, {'token': workspace.token})
+                return self._send(200, {
+                    'token': workspace.token,
+                    'team_mode': workspace.team_mode,
+                    'key_required': bool(workspace.team_key),
+                })
             if path == '/api/settings':
                 return self._send(200, workspace.settings())
             if path == '/api/profile':
@@ -618,7 +807,15 @@ def make_handler(workspace: Workspace):
             if path == '/api/cloud/nodes':
                 return self._send(200, workspace.vultr.list_nodes(sync_remote=False))
             if path.startswith('/api/operations/cases/'):
-                case_id = path.removeprefix('/api/operations/cases/').strip('/')
+                tail_case = path.removeprefix('/api/operations/cases/').strip('/')
+                if tail_case.endswith('/export'):
+                    case_id = tail_case.removesuffix('/export').strip('/')
+                    try:
+                        bundle = workspace.operations.export_case_bundle(case_id, workspace.brief)
+                        return self._send(200, bundle)
+                    except ValueError as exc:
+                        return self._send(404, {'error': str(exc)})
+                case_id = tail_case
                 try:
                     return self._send(200, workspace.operations.build_case_dossier(case_id, workspace.brief))
                 except ValueError as exc:
@@ -679,12 +876,15 @@ def make_handler(workspace: Workspace):
         def do_POST(self):
             if not self._local_request():
                 return self._send(403, {'error': 'Local access only.'})
-            expected_origin = f'http://{self.headers.get("Host", "")}'
-            if self.headers.get('Origin') != expected_origin or not secrets.compare_digest(
+            if not self._valid_origin() or not secrets.compare_digest(
                 self.headers.get('X-Workspace-Token', ''), workspace.token
             ):
                 return self._send(403, {'error': 'Invalid workspace session.'})
             parsed_path = urlparse(self.path).path
+            if workspace.team_key and parsed_path != '/api/operator/auth':
+                hdr_key = self.headers.get('X-Team-Key', '')
+                if not secrets.compare_digest(hdr_key, workspace.team_key):
+                    return self._send(403, {'error': 'Team Passkey required. Open Operator Session in the top bar and enter FIND3R_TEAM_KEY.'})
             path_parts = parsed_path.split('/')
             analysis_path = (
                 len(path_parts) == 5
@@ -692,24 +892,29 @@ def make_handler(workspace: Workspace):
                 and path_parts[4] == 'analysis'
             )
             allowed_posts = (
-                '/api/investigations', '/api/profile', '/api/resolve', '/api/settings',
+                '/api/investigations', '/api/investigations/batch',
+                '/api/profile', '/api/resolve', '/api/settings', '/api/operator/auth',
                 '/api/tools/install', '/api/tools/refresh',
                 '/api/ollama/select', '/api/ollama/pull', '/api/ollama/create', '/api/ollama/install',
                 '/api/cloud/spinup', '/api/cloud/destroy', '/api/cloud/select', '/api/cloud/rotate', '/api/cloud/sync',
-                '/api/operations/cases', '/api/operations/cases/delete',
+                '/api/operations/cases', '/api/operations/cases/delete', '/api/operations/cases/import',
                 '/api/operations/pin', '/api/operations/note', '/api/operations/note/delete',
                 '/api/operations/hypothesis', '/api/operations/hypothesis/delete',
+                '/api/operations/webhook', '/api/operations/webhook/test',
             )
             if parsed_path not in allowed_posts and not analysis_path:
                 return self._send(404, {'error': 'Not found.'})
             try:
+                max_len = 2_000_000 if parsed_path == '/api/operations/cases/import' else 65536
                 length = int(self.headers.get('Content-Length', '0'))
-                if not 0 < length <= 16384:
-                    raise ValueError('Request must be between 1 and 16384 bytes.')
+                if not 0 < length <= max_len:
+                    raise ValueError(f'Request must be between 1 and {max_len} bytes.')
                 payload = json.loads(self.rfile.read(length))
                 if not isinstance(payload, dict):
                     raise ValueError('Expected a JSON object.')
-                if parsed_path == '/api/resolve':
+                if parsed_path == '/api/operator/auth':
+                    result = workspace.register_operator(payload)
+                elif parsed_path == '/api/resolve':
                     result = resolve_seed(payload.get('seed', ''), payload.get('kind', 'auto'))
                 elif parsed_path == '/api/profile':
                     result = workspace.save_profile(payload)
@@ -748,6 +953,9 @@ def make_handler(workspace: Workspace):
                     result = workspace.operations.save_case(payload)
                 elif parsed_path == '/api/operations/cases/delete':
                     result = workspace.operations.delete_case(str(payload.get('id', '')))
+                elif parsed_path == '/api/operations/cases/import':
+                    bundle = payload.get('bundle') if isinstance(payload.get('bundle'), dict) else payload
+                    result = workspace.operations.import_case_bundle(bundle)
                 elif parsed_path == '/api/operations/pin':
                     result = workspace.operations.toggle_pin(payload)
                 elif parsed_path == '/api/operations/note':
@@ -762,6 +970,12 @@ def make_handler(workspace: Workspace):
                     rid = str(payload.get('run_id', '')).strip()
                     facts = workspace.brief(rid).get('facts', []) if len(rid) == 32 else []
                     result = workspace.operations.delete_hypothesis(str(payload.get('id', '')), rid, facts)
+                elif parsed_path == '/api/operations/webhook':
+                    result = workspace.operations.save_webhook(payload)
+                elif parsed_path == '/api/operations/webhook/test':
+                    result = workspace.operations.send_webhook_alert(payload)
+                elif parsed_path == '/api/investigations/batch':
+                    result = workspace.launch_batch(payload)
                 elif analysis_path:
                     run_id = path_parts[3]
                     if len(run_id) != 32 or any(c not in '0123456789abcdef' for c in run_id):
@@ -776,9 +990,13 @@ def make_handler(workspace: Workspace):
         def do_DELETE(self):
             if not self._local_request():
                 return self._send(403, {'error': 'Local access only.'})
-            if self.headers.get('Origin') != f'http://{self.headers.get("Host", "")}' or not secrets.compare_digest(
+            if not self._valid_origin() or not secrets.compare_digest(
                     self.headers.get('X-Workspace-Token', ''), workspace.token):
                 return self._send(403, {'error': 'Invalid workspace session.'})
+            if workspace.team_key:
+                hdr_key = self.headers.get('X-Team-Key', '')
+                if not secrets.compare_digest(hdr_key, workspace.team_key):
+                    return self._send(403, {'error': 'Team Passkey required.'})
             if not self.path.startswith('/api/runs/'):
                 return self._send(404, {'error': 'Not found.'})
             run_id = self.path.removeprefix('/api/runs/')
@@ -799,7 +1017,7 @@ def make_handler(workspace: Workspace):
     return Handler
 
 
-def serve(engine: sa.Engine, port: int = 8765):
+def serve(engine: sa.Engine, port: int = 8765, host: str = '127.0.0.1', team_key: str | None = None):
     if not sa.inspect(engine).has_table('engagement'):
         raise ValueError('Initialize the harness database with alembic upgrade head first.')
     # Terminate any stale NEESHA server process holding this port before binding.
@@ -819,7 +1037,7 @@ def serve(engine: sa.Engine, port: int = 8765):
     ledger = Ledger(engine)
     if ledger.summary().cap_usd == 0:
         ledger.set_cap(Decimal('100.00'))
-    workspace = Workspace(engine)
+    workspace = Workspace(engine, host=host, team_key=team_key)
     # Reports hold personal data and are not encrypted at rest: keep the tree
     # owner-only so other local users cannot read exported briefings.
     from neesha.config import harden_path
@@ -827,8 +1045,9 @@ def serve(engine: sa.Engine, port: int = 8765):
         harden_path(workspace.reports_root)
     cat = workspace._catalog(force=True)
     ready_names = [s['name'] for s in cat if s.get('ready')]
-    server = ThreadingHTTPServer(('127.0.0.1', port), make_handler(workspace))
-    print(f'Find3r workspace: http://127.0.0.1:{server.server_port} ({len(ready_names)}/{len(cat)} sources ready) (Ctrl-C to stop)', flush=True)
+    server = ThreadingHTTPServer((workspace.host, port), make_handler(workspace))
+    mode_tag = 'TEAM MODE' if workspace.team_mode else 'LOCAL'
+    print(f'Find3r workspace [{mode_tag}]: http://{workspace.host}:{server.server_port} ({len(ready_names)}/{len(cat)} sources ready) (Ctrl-C to stop)', flush=True)
     try:
         server.serve_forever()
     finally:

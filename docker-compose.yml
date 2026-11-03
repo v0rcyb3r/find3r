@@ -1,47 +1,51 @@
-# Neesha dev stack.
-#
-#   docker compose up -d postgres
-#   docker compose run --rm neesha --help
-#
-# Postgres is the deployment target, not an optional extra: the budget
-# ledger's reserve-then-settle needs row locks and the job queue needs
-# SKIP LOCKED. It binds to loopback only.
 services:
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_DB: neesha
-      POSTGRES_USER: neesha
-      POSTGRES_PASSWORD: ${NEESHA_PG_PASSWORD:?set NEESHA_PG_PASSWORD}
-    ports:
-      # Host port is configurable and defaults off 5432, which is
-      # commonly already taken by another project's database.
-      - "127.0.0.1:${NEESHA_PG_PORT:-5433}:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U neesha -d neesha"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
-  neesha:
+  find3r:
     build: .
+    container_name: find3r-workspace
+    restart: unless-stopped
+    ports:
+      - "${FIND3R_BIND_HOST:-127.0.0.1}:${FIND3R_PORT:-8765}:8765"
+    environment:
+      FIND3R_HOME: /data/find3r
+      FIND3R_DB_URL: postgresql+psycopg://find3r:${POSTGRES_PASSWORD:-find3r_local_pw}@postgres:5432/find3r
+      FIND3R_OLLAMA_URL: http://ollama:11434
+      FIND3R_TEAM_KEY: "${FIND3R_TEAM_KEY:-}"
+      SHODAN_API_KEY: "${SHODAN_API_KEY:-}"
+      CENSYS_API_TOKEN: "${CENSYS_API_TOKEN:-}"
+      HIBP_API_KEY: "${HIBP_API_KEY:-}"
+      URLSCAN_API_KEY: "${URLSCAN_API_KEY:-}"
+      HUNTER_API_KEY: "${HUNTER_API_KEY:-}"
+      GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
+    volumes:
+      - find3r_data:/data/find3r
     depends_on:
       postgres:
         condition: service_healthy
-    volumes:
-      - ./data:/app/data
-      - ./runs:/app/runs
-      - ./reports:/app/reports
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: find3r-postgres
+    restart: unless-stopped
     environment:
-      NEESHA_DATABASE_URL: >-
-        postgresql+psycopg://neesha:${NEESHA_PG_PASSWORD:-neesha}@postgres:5432/neesha
-      # Enforced by the application, not here: EvidenceStore and
-      # PreflightGate both refuse to run without these and explain why.
-      NEESHA_STORE_KEY: ${NEESHA_STORE_KEY:-}
-      NEESHA_PREFLIGHT_KEY: ${NEESHA_PREFLIGHT_KEY:-}
-    entrypoint: ["neesha"]
+      POSTGRES_USER: find3r
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-find3r_local_pw}"
+      POSTGRES_DB: find3r
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U find3r -d find3r"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: find3r-ollama
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
 
 volumes:
-  pgdata:
+  find3r_data:
+  postgres_data:
+  ollama_data:

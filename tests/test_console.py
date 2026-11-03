@@ -675,6 +675,49 @@ def test_stix_html_dossier_diff_and_operations_engine(workspace, client, monkeyp
     ops_snap = json.loads(body_hyp)['operations']
     assert any(h['title'].startswith('H4:') for h in ops_snap['hypotheses'])
 
+    # 6. Partner Case Bundle Export & Import (.find3r-case.json)
+    st_exp, _, body_exp = request(f'/api/operations/cases/{case_id}/export')
+    assert st_exp == 200
+    bundle = json.loads(body_exp)
+    assert bundle['format'] == 'find3r.case.bundle.v1'
+    assert len(bundle['bundle_sha256']) == 64
+    assert len(bundle['briefs']) == 2
+
+    bundle['case']['id'] = 'case-partner-imported'
+    bundle['case']['title'] = 'Partner Shared Case'
+    st_imp, _, body_imp = request('/api/operations/cases/import', 'POST', bundle, headers=headers)
+    assert st_imp in (200, 202)
+    imp_res = json.loads(body_imp)
+    assert imp_res['imported']['case_id'] == 'case-partner-imported'
+    assert imp_res['imported']['imported_runs'] == 2
+
+    # 7. Team Webhook Configuration & SSRF Guard
+    st_wh, _, body_wh = request('/api/operations/webhook', 'POST', {
+        'url': 'https://hooks.slack.com/services/T000/B000/X000',
+        'provider': 'slack',
+        'enabled': True,
+    }, headers=headers)
+    assert st_wh in (200, 202)
+    assert json.loads(body_wh)['webhook']['provider'] == 'slack'
+
+    # SSRF guard blocks loopback webhook target
+    st_wh_test, _, body_wh_test = request('/api/operations/webhook/test', 'POST', {
+        'url': 'http://127.0.0.1:8765/internal',
+        'provider': 'generic',
+    }, headers=headers)
+    assert st_wh_test in (200, 202)
+    assert json.loads(body_wh_test)['sent'] is False
+
+    # 8. Operator Presence & Team Auth
+    st_op, _, body_op = request('/api/operator/auth', 'POST', {
+        'callsign': 'partner-02',
+    }, headers=headers)
+    assert st_op in (200, 202)
+    op_data = json.loads(body_op)
+    assert op_data['authenticated'] is True
+    assert any(o['callsign'] == 'partner-02' for o in op_data['operators'])
+
+
 
 
 

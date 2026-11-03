@@ -146,22 +146,39 @@ class OperationsManager:
         self.lock = threading.Lock()
 
     def _load(self) -> dict[str, Any]:
+        default_state = {
+            "cases": [],
+            "pins": [],
+            "notes": [],
+            "hypotheses": [],
+            "imported_briefs": {},
+            "webhook": {"url_masked": "", "url": "", "kind": "slack", "enabled": False},
+        }
         if not self.store_path.exists():
-            return {"cases": [], "pins": [], "notes": [], "hypotheses": []}
+            return default_state
         try:
             if self.store_path.is_symlink():
-                return {"cases": [], "pins": [], "notes": [], "hypotheses": []}
+                return default_state
             data = json.loads(self.store_path.read_text(encoding="utf-8"))
             if not isinstance(data, dict):
-                return {"cases": [], "pins": [], "notes": [], "hypotheses": []}
+                return default_state
+            wh = data.get("webhook") if isinstance(data.get("webhook"), dict) else {}
+            wh_url = str(wh.get("url") or "").strip()
             return {
                 "cases": list(data.get("cases") or []),
                 "pins": list(data.get("pins") or []),
                 "notes": list(data.get("notes") or []),
                 "hypotheses": list(data.get("hypotheses") or []),
+                "imported_briefs": dict(data.get("imported_briefs") or {}),
+                "webhook": {
+                    "url": wh_url,
+                    "url_masked": ("••••" + wh_url[-12:]) if len(wh_url) > 12 else ("••••" if wh_url else ""),
+                    "kind": str(wh.get("kind") or "slack"),
+                    "enabled": bool(wh.get("enabled") and wh_url),
+                },
             }
         except Exception:
-            return {"cases": [], "pins": [], "notes": [], "hypotheses": []}
+            return default_state
 
     def _save(self, data: dict[str, Any]) -> None:
         self.store_path.parent.mkdir(parents=True, exist_ok=True)
@@ -178,14 +195,36 @@ class OperationsManager:
     def snapshot(self, run_id: str | None = None) -> dict[str, Any]:
         with self.lock:
             data = self._load()
+        wh_kind = data["webhook"].get("provider") or data["webhook"].get("kind") or "slack"
+        wh_public = {
+            "configured": bool(data["webhook"].get("url")),
+            "url": data["webhook"].get("url") or "",
+            "url_masked": data["webhook"].get("url_masked") or "",
+            "kind": wh_kind,
+            "provider": wh_kind,
+            "enabled": bool(data["webhook"].get("enabled")),
+        }
         if not run_id:
-            return data
+            return {
+                "cases": data["cases"],
+                "pins": data["pins"],
+                "notes": data["notes"],
+                "hypotheses": data["hypotheses"],
+                "webhook": wh_public,
+            }
         return {
             "cases": data["cases"],
             "pins": [p for p in data["pins"] if p.get("run_id") == run_id or p.get("global")],
             "notes": [n for n in data["notes"] if n.get("run_id") == run_id],
             "hypotheses": [h for h in data["hypotheses"] if h.get("run_id") == run_id],
+            "webhook": wh_public,
         }
+
+    def get_imported_brief(self, run_id: str) -> dict[str, Any] | None:
+        with self.lock:
+            data = self._load()
+            b = (data.get("imported_briefs") or {}).get(run_id)
+            return dict(b) if isinstance(b, dict) else None
 
     def save_case(self, payload: dict[str, Any]) -> dict[str, Any]:
         name = str(payload.get("name") or payload.get("title") or "").strip()[:120]
@@ -494,7 +533,11 @@ class OperationsManager:
             try:
                 b = brief_loader(rid)
             except Exception:
-                continue
+                imp = (data.get("imported_briefs") or {}).get(rid)
+                if isinstance(imp, dict):
+                    b = imp
+                else:
+                    continue
             target = str(b.get("company") or rid)
             run_summaries.append({
                 "run_id": rid,
@@ -558,3 +601,223 @@ class OperationsManager:
             "skipped": [],
             "collection": [],
         }
+
+    def export_case_bundle(self, case_id: str, brief_loader: Callable[[str], dict[str, Any]]) -> dict[str, Any]:
+        """Export a portable .find3r-case.json bundle for partner/team sharing."""
+        import hashlib
+
+        cid = str(case_id or "").strip()
+        with self.lock:
+            data = self._load()
+        case = next((c for c in data["cases"] if c.get("id") == cid), None)
+        if not case:
+            raise ValueError("Operation case not found.")
+
+        run_ids = list(case.get("run_ids") or [])
+        included_briefs: dict[str, dict[str, Any]] = {}
+        for rid in run_ids:
+            try:
+                included_briefs[rid] = brief_loader(rid)
+            except Exception:
+                imp = (data.get("imported_briefs") or {}).get(rid)
+                if isinstance(imp, dict):
+                    included_briefs[rid] = imp
+
+        case_pins = [p for p in data["pins"] if p.get("run_id") in run_ids or not p.get("run_id")]
+        case_notes = [n for n in data["notes"] if n.get("run_id") in run_ids or not n.get("run_id")]
+        case_hyps = [h for h in data["hypotheses"] if h.get("run_id") in run_ids or not h.get("run_id")]
+
+        payload = {
+            "format": "find3r.case.bundle.v1",
+            "exported_at": _now_iso(),
+            "case": case,
+            "briefs": included_briefs,
+            "pins": case_pins[:200],
+            "notes": case_notes[:200],
+            "hypotheses": case_hyps[:100],
+        }
+        canonical_bytes = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        payload["bundle_sha256"] = hashlib.sha256(canonical_bytes).hexdigest()
+        return payload
+
+    def import_case_bundle(self, bundle: dict[str, Any]) -> dict[str, Any]:
+        """Import a partner's .find3r-case.json bundle into the active workspace."""
+        if not isinstance(bundle, dict) or bundle.get("format") != "find3r.case.bundle.v1":
+            raise ValueError("Invalid case bundle format (expected find3r.case.bundle.v1).")
+        case_in = bundle.get("case")
+        if not isinstance(case_in, dict) or not (case_in.get("name") or case_in.get("title")):
+            raise ValueError("Case bundle is missing valid case metadata.")
+
+        title = str(case_in.get("name") or case_in.get("title")).strip()[:120]
+        client_tag = str(case_in.get("objective") or case_in.get("client") or "").strip()[:400]
+        classification = str(case_in.get("classification") or "TLP:AMBER").strip()[:32]
+        raw_runs = case_in.get("run_ids") if isinstance(case_in.get("run_ids"), list) else []
+        run_ids = [
+            str(r).strip()
+            for r in raw_runs[:50]
+            if len(str(r).strip()) == 32 and all(c in "0123456789abcdef" for c in str(r).strip())
+        ]
+
+        with self.lock:
+            data = self._load()
+            cid = str(case_in.get("id") or "").strip()[:32] or uuid4().hex[:16]
+            existing = next((c for c in data["cases"] if c.get("id") == cid), None)
+            saved_case = {
+                "id": cid,
+                "name": title,
+                "title": title,
+                "objective": client_tag,
+                "client": client_tag,
+                "classification": classification,
+                "run_ids": run_ids,
+                "created_at": str(case_in.get("created_at") or _now_iso()),
+                "updated_at": _now_iso(),
+            }
+            if existing:
+                existing.update(saved_case)
+            else:
+                data["cases"].insert(0, saved_case)
+
+            # Store imported briefs so they can be fused and inspected even if not in local SQLite
+            briefs_in = bundle.get("briefs") if isinstance(bundle.get("briefs"), dict) else {}
+            imp_store = data.setdefault("imported_briefs", {})
+            imported_runs_count = 0
+            for rid, b_obj in list(briefs_in.items())[:50]:
+                if len(str(rid)) == 32 and isinstance(b_obj, dict):
+                    imp_store[str(rid)] = b_obj
+                    imported_runs_count += 1
+
+            # Merge pins, notes, and hypotheses without duplicating IDs
+            existing_pin_ids = {p.get("id") for p in data["pins"]}
+            imported_pins_count = 0
+            for p in (bundle.get("pins") or [])[:200]:
+                if isinstance(p, dict) and p.get("id") not in existing_pin_ids:
+                    data["pins"].append(p)
+                    existing_pin_ids.add(p.get("id"))
+                    imported_pins_count += 1
+
+            existing_note_ids = {n.get("id") for n in data["notes"]}
+            imported_notes_count = 0
+            for n in (bundle.get("notes") or [])[:200]:
+                if isinstance(n, dict) and n.get("id") not in existing_note_ids:
+                    data["notes"].append(n)
+                    existing_note_ids.add(n.get("id"))
+                    imported_notes_count += 1
+
+            existing_hyp_ids = {h.get("id") for h in data["hypotheses"]}
+            for h in (bundle.get("hypotheses") or [])[:100]:
+                if isinstance(h, dict) and h.get("id") not in existing_hyp_ids:
+                    data["hypotheses"].append(h)
+                    existing_hyp_ids.add(h.get("id"))
+
+            self._save(data)
+        return {
+            "imported": {
+                "case_id": cid,
+                "case_title": title,
+                "imported_runs": imported_runs_count,
+                "imported_pins": imported_pins_count,
+                "imported_notes": imported_notes_count,
+            },
+            "imported_case": saved_case,
+            "imported_runs_count": imported_runs_count,
+            "operations": self.snapshot(),
+        }
+
+    def save_webhook(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Configure a Slack, Discord, or Generic HTTPS Webhook for team & delta alerts."""
+        import ipaddress
+        from urllib.parse import urlparse
+
+        url = str(payload.get("url") or "").strip()
+        kind = str(payload.get("provider") or payload.get("kind") or "slack").strip().lower()
+        if kind not in ("slack", "discord", "generic"):
+            kind = "slack"
+        enabled = bool(payload.get("enabled", True))
+
+        if url:
+            parsed = urlparse(url)
+            if parsed.scheme != "https" or not parsed.hostname:
+                raise ValueError("Webhook URL must use HTTPS and a valid hostname.")
+            try:
+                ip = ipaddress.ip_address(parsed.hostname)
+                if not ip.is_global:
+                    raise ValueError("Webhook URL must target a globally routable host.")
+            except ValueError as exc:
+                if "globally routable" in str(exc):
+                    raise
+                if parsed.hostname.lower() in ("localhost", "localhost.localdomain"):
+                    raise ValueError("Webhook URL cannot target localhost.") from None
+
+        with self.lock:
+            data = self._load()
+            data["webhook"] = {
+                "url": url,
+                "kind": kind,
+                "provider": kind,
+                "enabled": bool(enabled and url),
+            }
+            self._save(data)
+        return {"webhook": self.snapshot()["webhook"], "operations": self.snapshot()}
+
+    def send_webhook_alert(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Dispatch a real-time alert to the configured team webhook (Slack/Discord/Generic)."""
+        import ipaddress
+        import socket
+        import urllib.request
+        from urllib.parse import urlparse
+        from neesha.collectors.network import _default_context
+        from neesha.runtime.providers import _NoRedirect
+
+        with self.lock:
+            data = self._load()
+            wh = data.get("webhook") or {}
+        url = str(payload.get("url") or wh.get("url") or "").strip()
+        kind = str(payload.get("provider") or payload.get("kind") or wh.get("provider") or wh.get("kind") or "slack").strip().lower()
+        if not url:
+            return {"sent": False, "error": "Configure an HTTPS Webhook URL first."}
+
+        parsed = urlparse(url)
+        if parsed.scheme != "https" or not parsed.hostname:
+            return {"sent": False, "error": "Webhook URL must use HTTPS."}
+        try:
+            infos = socket.getaddrinfo(parsed.hostname, 443, proto=socket.IPPROTO_TCP)
+            for info in infos:
+                if not ipaddress.ip_address(info[4][0]).is_global:
+                    return {"sent": False, "error": "Webhook hostname resolved to a non-global IP address."}
+        except Exception as exc:
+            return {"sent": False, "error": f"Could not resolve webhook host: {exc}"}
+
+        title = str(payload.get("title") or "Find3r Intelligence Alert").strip()[:200]
+        summary = str(payload.get("summary") or "New operational event or attack-surface delta recorded.").strip()[:1500]
+        msg_text = f"*{title}*\n{summary}"
+
+        if kind == "slack":
+            body = json.dumps({"text": msg_text}).encode("utf-8")
+        elif kind == "discord":
+            body = json.dumps({"content": msg_text}).encode("utf-8")
+        else:
+            body = json.dumps({
+                "event": "find3r.alert",
+                "timestamp": _now_iso(),
+                "title": title,
+                "summary": summary,
+            }).encode("utf-8")
+
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}),
+            urllib.request.HTTPSHandler(context=_default_context()),
+            _NoRedirect(),
+        )
+        req = urllib.request.Request(
+            url,
+            data=body,
+            method="POST",
+            headers={"Content-Type": "application/json", "User-Agent": "Find3r-Webhook/0.2"},
+        )
+        try:
+            with opener.open(req, timeout=10) as resp:
+                status = getattr(resp, "status", 200)
+        except Exception as exc:
+            raise ValueError(f"Webhook delivery failed: {exc}") from exc
+        return {"sent": True, "http_status": status, "kind": kind}

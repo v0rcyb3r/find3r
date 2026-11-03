@@ -616,13 +616,23 @@ def _print_report(report) -> None:
 @harness_app.command('serve')
 def harness_serve(
     port: int = typer.Option(8765, '--port', min=1, max=65535),
+    host: str = typer.Option(
+        '127.0.0.1',
+        '--host',
+        help='Bind address (use 0.0.0.0 or Tailscale IP for partner/team mode)',
+    ),
+    team_key: Optional[str] = typer.Option(
+        None,
+        '--team-key',
+        help='Shared team passkey for multi-operator access (or set FIND3R_TEAM_KEY)',
+    ),
 ) -> None:
-    """Open the local investigator workspace (loopback only)."""
+    """Open the investigator workspace (local loopback or shared partner team mode)."""
     from neesha.console.server import serve
 
     engine = get_engine()
     _require_schema(engine)
-    serve(engine, port=port)
+    serve(engine, port=port, host=host, team_key=team_key)
 
 
 @harness_app.command('maltego-transform')

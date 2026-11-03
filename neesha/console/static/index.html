@@ -63,12 +63,26 @@
           <option value="company">Company Name</option>
           <option value="person">Person Name</option>
         </select>
+        <button class="secondary" id="toggle-batch-btn" type="button" title="Toggle Bulk / Multi-Target Batch Queue">Batch Queue</button>
         <button class="primary" id="launch" type="submit">Investigate</button>
+      </div>
+      <div id="batch-panel" class="batch-panel" hidden>
+        <div class="field-label">MULTI-TARGET BATCH INGESTION &amp; OPERATION AUTO-FUSION (UP TO 20 TARGETS)</div>
+        <div class="batch-grid">
+          <textarea id="batch-targets" class="dialog-input" rows="3" placeholder="Paste multiple targets (one per line or comma-separated: domains, IPs, emails, or usernames)…"></textarea>
+          <div class="batch-side">
+            <input id="batch-case-title" class="dialog-input" type="text" placeholder="Optional Operation Case title (auto-fuses all targets)…" autocomplete="off">
+            <div class="export-actions">
+              <button class="primary" id="launch-batch-btn" type="button">Launch Batch Queue</button>
+              <button class="secondary" id="close-batch-btn" type="button">Close Batch</button>
+            </div>
+          </div>
+        </div>
       </div>
       <div class="form-options">
         <div class="export-actions">
           <label class="contact-option"><input id="website" type="checkbox" checked> Inspect live website, TLS &amp; tech stack</label>
-          <label class="contact-option"><input id="contacts" type="checkbox"> Include metered APIs (Hunter / IntelX) <span class="tag">OPTIONAL · $1 CAP</span></label>
+          <label class="contact-option"><input id="contacts" type="checkbox"> Include metered APIs (Hunter / IntelX) <span class="tag">OPTIONAL</span></label>
         </div>
         <div class="telemetry-strip">
           <button type="button" class="telemetry-chip" id="chip-route" title="Click to configure Ephemeral Vultr VPS routing">ROUTE: LOCAL</button>
@@ -125,7 +139,6 @@
           <div class="heading-row compact-hero">
             <div>
               <div class="eyebrow">FIND3R · TACTICAL OSINT &amp; POSTURE WORKBENCH</div>
-              <h1>Evidence. Context.<br><span>A clearer picture.</span></h1>
               <p class="intro">Investigate a domain, company, email address, username, IP, or phone.<br>Keep the observation, its source, A–F security posture grade, and uncertainty together.</p>
             </div>
             <div class="process-index" aria-label="Investigation process">
@@ -296,31 +309,35 @@
   </form>
 </dialog>
 <dialog id="operator-dialog">
-  <div class="dialog-head"><span class="eyebrow">OPERATOR SESSION &amp; MULTI-ANALYST ACCESS</span><button id="close-operator" type="button" aria-label="Close operator dialog">Close</button></div>
+  <div class="dialog-head"><span class="eyebrow">OPERATOR SESSION, PARTNER COLLABORATION &amp; TEAM ACCESS</span><button id="close-operator" type="button" aria-label="Close operator dialog">Close</button></div>
   <form id="operator-form">
-    <p class="notice">Find3r enforces per-session workspace tokens (<code>X-Workspace-Token</code>) and strict localhost origin gates. Multi-operator OIDC/SSO authentication is staged for team deployments.</p>
+    <p class="notice">Work solo on localhost or share a live workspace with your partner over Tailscale or Docker Compose using a shared Team Passkey (<code>FIND3R_TEAM_KEY</code>) and portable <code>.find3r-case.json</code> case bundles.</p>
     <div class="operator-status-grid">
       <div class="posture-card">
-        <div class="eyebrow">SESSION AUTHENTICATION</div>
+        <div class="eyebrow">SESSION &amp; TEAM MODE</div>
         <strong id="operator-session-state" class="mono">ACTIVE · LOCAL TOKEN</strong>
-        <p class="notice">CSRF-guarded session token bound to this browser workspace.</p>
+        <p class="notice" id="operator-team-note">Concurrent multi-job pool active (up to 4 simultaneous partner scans).</p>
       </div>
       <div class="posture-card">
-        <div class="eyebrow">ACTIVE EXECUTION NODE</div>
+        <div class="eyebrow">ACTIVE OPERATORS ONLINE</div>
         <strong id="operator-node-state" class="mono">LOCAL WORKSPACE</strong>
-        <p class="notice">Shared Vultr Ubuntu 24.04 nodes can be accessed by teammates over SSH.</p>
+        <p class="notice" id="operator-team-list">Solo session · register callsign below to broadcast presence to partner.</p>
       </div>
     </div>
     <label class="setting-row">
-      <span>Active Operator Callsign / Analyst Tag <small id="operator-tag-status">ACTIVE</small></span>
-      <input class="dialog-input" type="text" id="operator-callsign" placeholder="e.g. operator-01 or analyst@team" value="local-analyst" autocomplete="off">
+      <span>Your Operator Callsign / Analyst Handle <small id="operator-tag-status">ACTIVE</small></span>
+      <input class="dialog-input" type="text" id="operator-callsign" placeholder="e.g. alpha-01 or partner-lead" value="local-analyst" autocomplete="off">
     </label>
-    <p class="notice"><strong>Team Vultr VPS Sharing:</strong> Open the <em>Ephemeral VPS Nodes</em> tab, spin up a randomized Ubuntu 24.04 node, and click <strong>Copy SSH</strong> on any node card to share its <code>ssh -i ... root@&lt;ip&gt;</code> command with coworkers.</p>
+    <label class="setting-row">
+      <span>Shared Team Passkey (Optional · required when server runs with <code>--team-key</code>)</span>
+      <input class="dialog-input" type="password" id="operator-team-key" placeholder="Enter FIND3R_TEAM_KEY if connecting to shared partner host" autocomplete="off">
+    </label>
+    <p class="notice"><strong>Partner Hosting Quick-Start:</strong> Run <code>./deploy-cloud.sh</code> (Docker + Postgres + Ollama) or <code>find3r serve --host 0.0.0.0 --team-key &lt;secret&gt;</code> on a shared VPS or Tailscale machine so you and your partner share live runs, cases, pins, and ACH boards in real time.</p>
     <p id="operator-message" class="notice" role="status"></p>
     <div class="export-actions">
       <button class="secondary" type="button" id="operator-open-cloud">Manage Team VPS Nodes</button>
       <button class="secondary" type="button" id="cancel-operator">Close</button>
-      <button class="primary" type="submit" id="save-operator">Apply Operator Tag</button>
+      <button class="primary" type="submit" id="save-operator">Sync Operator Session</button>
     </div>
   </form>
 </dialog>

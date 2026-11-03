@@ -1264,6 +1264,27 @@ footer{
 .svg-pan-active{cursor:grabbing !important}
 .geo-map-canvas svg,.source-chart-canvas svg,.graph-canvas svg{cursor:grab}
 
+/* Batch Target Ingestion & Team Collaboration */
+.batch-panel{
+  margin-top:12px;
+  padding:16px 18px;
+  border:1px solid var(--line-hover);
+  border-radius:var(--r-lg);
+  background:#111116;
+}
+.batch-grid{
+  display:grid;
+  grid-template-columns:1.4fr 1fr;
+  gap:12px;
+  margin-top:8px;
+}
+.batch-side{
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+  justify-content:space-between;
+}
+
 @media(max-width:1150px){
   .detail-split-layout.drawer-open{grid-template-columns:1fr}
   .context-drawer{position:static;max-height:none}

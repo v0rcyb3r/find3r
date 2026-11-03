@@ -4,7 +4,7 @@ const text = (tag, value, cls) => { const el = document.createElement(tag); el.t
 let session = '', snapshot = null, brief = null, tab = 'overview', selectedRun = null, polling = false;
 let harnessMode = 'deterministic', harnessProviders = [], deleteTarget = null;
 let graphZoom = 1, graphKindFilter = 'all', workspaceView = 'command';
-let runSearchQuery = '', runKindFilter = 'all', operatorCallsign = 'local-analyst';
+let runSearchQuery = '', runKindFilter = 'all', operatorCallsign = 'local-analyst', teamPasskey = '';
 
 function setWorkspaceView(viewName) {
   workspaceView = viewName;
@@ -43,7 +43,11 @@ const date = (value) => {
 };
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {cache:'no-store', ...options});
+  const mergedHeaders = {...(options.headers || {})};
+  if (teamPasskey) mergedHeaders['X-Team-Key'] = teamPasskey;
+  const fetchOpts = {cache: 'no-store', ...options};
+  if (Object.keys(mergedHeaders).length) fetchOpts.headers = mergedHeaders;
+  const response = await fetch(path, fetchOpts);
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || 'The workspace could not complete this request.');
   return data;
@@ -915,6 +919,7 @@ $('#investigate').addEventListener('submit', async e => {
         seed,
         domain: seed,
         kind: chosenKind || 'auto',
+        operator: operatorCallsign,
         contacts: !isPersonal && $('#contacts').checked,
         website: !isPersonal && $('#website').checked,
         analysis_mode: harnessMode,
@@ -929,6 +934,60 @@ $('#investigate').addEventListener('submit', async e => {
     $('#launch').disabled = false;
   }
 });
+
+if ($('#toggle-batch-btn')) {
+  $('#toggle-batch-btn').onclick = () => {
+    const bp = $('#batch-panel');
+    if (bp) bp.hidden = !bp.hidden;
+  };
+}
+if ($('#close-batch-btn')) {
+  $('#close-batch-btn').onclick = () => {
+    const bp = $('#batch-panel');
+    if (bp) bp.hidden = true;
+  };
+}
+if ($('#launch-batch-btn')) {
+  $('#launch-batch-btn').onclick = async () => {
+    const raw = ($('#batch-targets')?.value || '').trim();
+    if (!raw) {
+      message('Paste one or more targets (domains, IPs, emails, or usernames) into the batch queue.', true);
+      return;
+    }
+    const caseTitle = ($('#batch-case-title')?.value || '').trim();
+    const chosenKind = $('#seed-kind') ? $('#seed-kind').value : 'auto';
+    const btn = $('#launch-batch-btn');
+    btn.disabled = true;
+    btn.textContent = 'Queueing Batch…';
+    try {
+      const res = await api('/api/investigations/batch', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json', 'X-Workspace-Token': session},
+        body: JSON.stringify({
+          targets: raw,
+          kind: chosenKind || 'auto',
+          case_title: caseTitle,
+          operator: operatorCallsign,
+          contacts: $('#contacts')?.checked || false,
+          website: $('#website')?.checked !== false,
+          analysis_mode: harnessMode,
+          providers: harnessMode === 'deterministic' ? [] : harnessProviders,
+        }),
+      });
+      if ($('#batch-targets')) $('#batch-targets').value = '';
+      if ($('#batch-case-title')) $('#batch-case-title').value = '';
+      if ($('#batch-panel')) $('#batch-panel').hidden = true;
+      polling = true;
+      message(`Launched batch queue for ${res.batch_count || 0} target(s)${res.case?.title ? ` fused into "${res.case.title}"` : ''}.`);
+      await refresh();
+    } catch (err) {
+      message(err.message, true);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Launch Batch Queue';
+    }
+  };
+}
 
 $('#back').onclick = goHome;
 $('#home').onclick = goHome;
@@ -1386,14 +1445,28 @@ function openOperatorDialog() {
   const dlg = $('#operator-dialog');
   if (!dlg) return;
   if ($('#operator-message')) $('#operator-message').textContent = '';
+  const team = snapshot?.team || {};
   if ($('#operator-session-state')) {
-    $('#operator-session-state').textContent = session ? `ACTIVE · TOKEN ${session.slice(0, 8)}…` : 'LOCAL SESSION';
+    const modeTag = team.team_mode ? 'SHARED PARTNER MODE' : 'LOCAL LOOPBACK';
+    $('#operator-session-state').textContent = session ? `ACTIVE · ${modeTag}` : 'LOCAL SESSION';
   }
   if ($('#operator-node-state')) {
-    $('#operator-node-state').textContent = $('#header-node-status') ? $('#header-node-status').textContent : 'LOCAL WORKSPACE';
+    const opsCount = (team.operators || []).length;
+    $('#operator-node-state').textContent = opsCount
+      ? `${opsCount} OPERATOR${opsCount === 1 ? '' : 'S'} ACTIVE`
+      : ($('#header-node-status') ? $('#header-node-status').textContent : 'LOCAL WORKSPACE');
+  }
+  if ($('#operator-team-list')) {
+    const opsList = (team.operators || []).map(o => `${o.callsign} (${o.role || 'analyst'})`);
+    $('#operator-team-list').textContent = opsList.length
+      ? `Online: ${opsList.join(' · ')}`
+      : 'Solo session · register callsign below to broadcast presence to partner.';
   }
   if ($('#operator-callsign')) {
     $('#operator-callsign').value = operatorCallsign;
+  }
+  if ($('#operator-team-key')) {
+    $('#operator-team-key').value = teamPasskey;
   }
   dlg.showModal();
 }
@@ -1407,15 +1480,35 @@ if ($('#operator-open-cloud')) {
   };
 }
 if ($('#operator-form')) {
-  $('#operator-form').addEventListener('submit', e => {
+  $('#operator-form').addEventListener('submit', async e => {
     e.preventDefault();
     const val = ($('#operator-callsign')?.value || '').trim() || 'local-analyst';
+    const keyVal = ($('#operator-team-key')?.value || '').trim();
     operatorCallsign = val;
-    if ($('#operator-login-btn')) {
-      $('#operator-login-btn').textContent = `OPERATOR: ${val.toUpperCase()} · STAGED`;
+    if (keyVal) teamPasskey = keyVal;
+    try {
+      const res = await api('/api/operator/auth', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json', 'X-Workspace-Token': session},
+        body: JSON.stringify({callsign: val, team_key: teamPasskey}),
+      });
+      if (snapshot && res) {
+        snapshot.team = {
+          ...(snapshot.team || {}),
+          team_mode: res.team_mode,
+          operators: res.operators || [],
+        };
+      }
+      const opsCount = (res?.operators || []).length || 1;
+      if ($('#operator-login-btn')) {
+        $('#operator-login-btn').textContent = `OPERATOR: ${val.toUpperCase()} · ${opsCount} ONLINE`;
+      }
+      $('#operator-dialog').close();
+      message(`Synced operator session as "${val}" (${opsCount} active operator${opsCount === 1 ? '' : 's'}).`);
+    } catch (err) {
+      if ($('#operator-message')) $('#operator-message').textContent = err.message;
+      else message(err.message, true);
     }
-    $('#operator-dialog').close();
-    message(`Active operator callsign set to "${val}".`);
   });
 }
 
@@ -2692,7 +2785,33 @@ function renderOperationsTab(view) {
       message(err.message, true);
     }
   };
-  caseForm.append(titleInp, clientInp, createCaseBtn);
+  const importBundleBtn = text('button', 'Import Partner Case Bundle (.json)', 'secondary');
+  importBundleBtn.type = 'button';
+  const fileInput = document.createElement('input');
+  fileInput.type = 'file';
+  fileInput.accept = '.json,application/json';
+  fileInput.hidden = true;
+  importBundleBtn.onclick = () => fileInput.click?.();
+  fileInput.onchange = async () => {
+    const file = fileInput.files?.[0];
+    if (!file) return;
+    try {
+      const rawText = await file.text();
+      const parsed = JSON.parse(rawText);
+      const res = await api('/api/operations/cases/import', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json', 'X-Workspace-Token': session},
+        body: JSON.stringify(parsed),
+      });
+      if (snapshot) snapshot.operations = res.operations;
+      await refresh();
+      message(`Imported partner case "${res.imported?.case_title || 'Operation Case'}" (${res.imported?.imported_runs || 0} runs, ${res.imported?.imported_pins || 0} pins, ${res.imported?.imported_notes || 0} notes).`);
+      renderView();
+    } catch (err) {
+      message(`Failed to import case bundle: ${err.message}`, true);
+    }
+  };
+  caseForm.append(titleInp, clientInp, createCaseBtn, importBundleBtn, fileInput);
   casePanel.body.append(caseForm, runCheckboxes);
 
   const casesList = text('div', null, 'ops-grid');
@@ -2728,7 +2847,23 @@ function renderOperationsTab(view) {
         message(err.message, true);
       }
     };
-    actions.append(fuseBtn, loadFusedBtn);
+    const exportBundleBtn = text('button', 'Share Bundle (.json)', 'secondary');
+    exportBundleBtn.type = 'button';
+    exportBundleBtn.onclick = async () => {
+      try {
+        const bundle = await api(`/api/operations/cases/${encodeURIComponent(c.id)}/export`);
+        const url = URL.createObjectURL(new Blob([JSON.stringify(bundle, null, 2)], {type: 'application/json'}));
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${c.id}.find3r-case.json`;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        message(`Exported portable partner case bundle "${c.id}.find3r-case.json" (SHA-256: ${(bundle.bundle_sha256 || '').slice(0, 12)}…).`);
+      } catch (err) {
+        message(err.message, true);
+      }
+    };
+    actions.append(fuseBtn, loadFusedBtn, exportBundleBtn);
     card.append(actions);
     casesList.append(card);
   });
@@ -2881,6 +3016,71 @@ function renderOperationsTab(view) {
   achWrap.append(achTable);
   achPanel.body.append(achWrap);
   view.append(achPanel.root);
+
+  // 5. Team Webhook & Continuous Delta Alerting (Slack / Discord / Generic HTTPS)
+  const wh = ops.webhook || {url: '', provider: 'slack', enabled: false};
+  const whPanel = panel('Team Webhook & Continuous Delta Alerting · Slack / Discord / HTTPS');
+  whPanel.body.append(
+    text('p', 'Push real-time operational notifications to a shared Slack channel, Discord channel, or SIEM/SOAR webhook whenever attack surface deltas or high-severity exposures are detected.', 'notice')
+  );
+  const whBar = text('div', null, 'ops-diff-bar');
+  const whProv = document.createElement('select');
+  whProv.setAttribute('aria-label', 'Webhook provider');
+  [['slack', 'Slack Incoming Webhook'], ['discord', 'Discord Webhook'], ['generic', 'Generic HTTPS JSON Webhook']].forEach(([v, l]) => {
+    const o = text('option', l);
+    o.value = v;
+    whProv.append(o);
+  });
+  whProv.value = wh.provider || 'slack';
+  const whUrl = document.createElement('input');
+  whUrl.type = 'text';
+  whUrl.placeholder = 'https://hooks.slack.com/services/… or Discord webhook URL';
+  whUrl.value = wh.url || '';
+  const saveWhBtn = text('button', 'Save Webhook', 'primary');
+  saveWhBtn.type = 'button';
+  saveWhBtn.onclick = async () => {
+    try {
+      const res = await api('/api/operations/webhook', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json', 'X-Workspace-Token': session},
+        body: JSON.stringify({
+          url: whUrl.value.trim(),
+          provider: whProv.value,
+          enabled: Boolean(whUrl.value.trim()),
+        }),
+      });
+      if (snapshot) snapshot.operations = res.operations;
+      message(`Saved ${whProv.value.toUpperCase()} team webhook configuration.`);
+      renderView();
+    } catch (err) {
+      message(err.message, true);
+    }
+  };
+  const testWhBtn = text('button', 'Send Test Alert', 'secondary');
+  testWhBtn.type = 'button';
+  testWhBtn.onclick = async () => {
+    testWhBtn.disabled = true;
+    testWhBtn.textContent = 'Sending…';
+    try {
+      const res = await api('/api/operations/webhook/test', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json', 'X-Workspace-Token': session},
+        body: JSON.stringify({
+          title: `Find3r Partner Alert · ${subjectLabel()}`,
+          summary: `Operator ${operatorCallsign} triggered a live dossier alert for ${subjectLabel()} (Grade ${brief?.posture?.overall?.letter || 'N/A'}).`,
+        }),
+      });
+      message(res.sent ? `Delivered live alert to ${res.provider || 'webhook'} (HTTP ${res.http_status}).` : (res.error || 'Webhook test failed.'), !res.sent);
+    } catch (err) {
+      message(err.message, true);
+    } finally {
+      testWhBtn.disabled = false;
+      testWhBtn.textContent = 'Send Test Alert';
+    }
+  };
+  whBar.append(whProv, whUrl, saveWhBtn, testWhBtn);
+  whPanel.body.append(whBar);
+  view.append(whPanel.root);
 }
 
 // =========================================================================
@@ -3076,7 +3276,7 @@ function renderAnalysis(view) {
   mode.onchange = () => {
     choices.querySelectorAll('input').forEach(i => i.disabled = mode.value === 'deterministic');
   };
-  const run = text('button', 'Run selected analysis · $1 cap', 'primary');
+  const run = text('button', 'Run selected analysis', 'primary');
   run.type = 'submit';
   const status = text('p', available.length ? 'Every output remains tentative and requires human review.' : 'No runtime providers are ready. Click "API KEYS & SETTINGS" in the top bar to configure OpenAI, Anthropic, Gemini, or DeepSeek.', 'notice');
   form.append(mode, choices, run, status);
